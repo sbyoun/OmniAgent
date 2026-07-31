@@ -75,9 +75,11 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       if (disposed) return;
       fit.fit();
       try {
-        // Local pods run inside a named tmux session (stable per pod id) so
-        // their content is restored when the app is reopened.
-        const session = host ? null : `omniagent-${podId}`;
+        // Every pod runs inside its OWN named tmux session (stable per pod
+        // id), local or remote — so opening the same server twice gives two
+        // independent sessions, and each pod restores its own content when
+        // the app is reopened.
+        const session = `omniagent-${podId}`;
         await ptySpawn(podId, host, session, term.rows, term.cols);
         if (!disposed) setStatus("running");
       } catch (e) {

@@ -10,9 +10,12 @@ pub struct PtyInstance {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
-    /// Name of the local tmux session backing this pod, if any. Killed when
-    /// the pod is explicitly closed so sessions don't accumulate.
-    local_tmux: Option<String>,
+    /// Host this pod is connected to (None = local).
+    host: Option<String>,
+    /// Name of the tmux session backing this pod (local or remote). Killed
+    /// when the pod is explicitly closed so sessions don't accumulate;
+    /// preserved on app quit so the pod can restore.
+    tmux_session: Option<String>,
 }
 
 /// Monotonic generation per spawn. A pod id can be re-spawned (e.g. webview
@@ -60,21 +63,26 @@ pub fn pty_spawn(
         })
         .map_err(|e| e.to_string())?;
 
-    let local_tmux = if host.is_none() { session.clone() } else { None };
     let mut cmd = match &host {
         Some(h) => {
+            // Each pod gets its OWN named session on the server — opening a
+            // host twice must create two independent sessions, never mirror
+            // one. Falls back to a plain login shell when tmux is missing.
+            let remote_cmd = match &session {
+                Some(name) => format!(
+                    "tmux new-session -A -s '{}' 2>/dev/null || exec $SHELL -l",
+                    name.replace('\'', "")
+                ),
+                None => "exec $SHELL -l".to_string(),
+            };
             let mut c = CommandBuilder::new("ssh");
-            c.args([
-                "-t",
-                h,
-                "tmux attach 2>/dev/null || tmux new 2>/dev/null || exec $SHELL -l",
-            ]);
+            c.args(["-t", h, &remote_cmd]);
             c
         }
         None => {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
             let mut c = CommandBuilder::new(&shell);
-            match &local_tmux {
+            match &session {
                 // Attach-or-create a named tmux session so the pod's content
                 // survives app restarts; fall back to a plain shell when tmux
                 // is not installed.
@@ -189,7 +197,8 @@ pub fn pty_spawn(
             master: pair.master,
             writer,
             child,
-            local_tmux,
+            host,
+            tmux_session: session,
         },
     );
     Ok(())
@@ -242,18 +251,31 @@ pub fn pty_kill(state: State<'_, PtyManager>, id: String) -> Result<(), String> 
     state.gens.lock().unwrap().remove(&id);
     if let Some(mut inst) = map.remove(&id) {
         let _ = inst.child.kill();
-        // Explicit close: tear down the pod's backing tmux session too.
-        if let Some(name) = inst.local_tmux {
-            let _ = std::process::Command::new("tmux")
-                .args(["kill-session", "-t", &name])
-                .env(
-                    "PATH",
-                    format!(
-                        "{}:/opt/homebrew/bin:/usr/local/bin",
-                        std::env::var("PATH").unwrap_or_default()
-                    ),
-                )
-                .output();
+        // Explicit close: tear down the pod's backing tmux session too
+        // (local or remote). Done on a thread so a slow ssh round-trip
+        // never blocks closing the pod.
+        if let Some(name) = inst.tmux_session {
+            let host = inst.host;
+            std::thread::spawn(move || match host {
+                None => {
+                    let _ = std::process::Command::new("tmux")
+                        .args(["kill-session", "-t", &name])
+                        .env(
+                            "PATH",
+                            format!(
+                                "{}:/opt/homebrew/bin:/usr/local/bin",
+                                std::env::var("PATH").unwrap_or_default()
+                            ),
+                        )
+                        .output();
+                }
+                Some(h) => {
+                    let _ = std::process::Command::new("ssh")
+                        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
+                        .arg(format!("tmux kill-session -t '{}'", name.replace('\'', "")))
+                        .output();
+                }
+            });
         }
     }
     Ok(())
