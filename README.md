@@ -2,6 +2,8 @@
 
 **A control tower for your AI agent fleet.**
 
+![OmniAgent — agents working across a fleet of servers in one pod grid](assets/screenshot.png)
+
 OmniAgent is a native desktop terminal built for one job: running and monitoring
 CLI coding agents (Claude Code, aider, Codex CLI, …) across all of your machines
 at once. Every server becomes a *pod* in a tiled grid — each pod a live terminal
