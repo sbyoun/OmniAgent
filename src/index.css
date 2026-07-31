@@ -79,6 +79,19 @@ body,
   padding: 0;
 }
 
+/* Stacked pods: make the front (active) tab unmistakable — brighter
+   surface with a primary accent bar on top; back tabs are dimmed. */
+.dockview-theme-dark .dv-tab.dv-active-tab {
+  background: #2f2f2f;
+  box-shadow: inset 0 2px 0 0 #569cd6;
+}
+.dockview-theme-dark .dv-tab.dv-inactive-tab {
+  opacity: 0.45;
+}
+.dockview-theme-dark .dv-tab.dv-inactive-tab:hover {
+  opacity: 0.8;
+}
+
 .xterm .xterm-viewport {
   scrollbar-width: thin;
   scrollbar-color: #353535 transparent;
