@@ -70,9 +70,11 @@ pub fn pty_spawn(
             // one. Falls back to a plain login shell when tmux is missing.
             // `\; set-option status off`: the pod header already shows
             // connection state, so hide tmux's own status bar.
+            // `-u` forces UTF-8 handling even when the login environment has
+            // no UTF-8 locale set.
             let remote_cmd = match &session {
                 Some(name) => format!(
-                    "tmux new-session -A -s '{}' \\; set-option status off 2>/dev/null || exec $SHELL -l",
+                    "tmux -u new-session -A -s '{}' \\; set-option status off 2>/dev/null || exec $SHELL -l",
                     name.replace('\'', "")
                 ),
                 None => "exec $SHELL -l".to_string(),
@@ -93,7 +95,7 @@ pub fn pty_spawn(
                         "-l",
                         "-c",
                         &format!(
-                            "command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s '{}' \\; set-option status off || exec \"{}\" -l",
+                            "command -v tmux >/dev/null 2>&1 && exec tmux -u new-session -A -s '{}' \\; set-option status off || exec \"{}\" -l",
                             name.replace('\'', ""),
                             shell
                         ),
@@ -107,6 +109,16 @@ pub fn pty_spawn(
         }
     };
     cmd.env("TERM", "xterm-256color");
+    // GUI apps launched from Finder inherit no locale, and a tmux client
+    // without a UTF-8 LC_CTYPE treats the terminal as non-UTF-8 — dropping
+    // multibyte (e.g. Korean) input and rendering existing wide glyphs as
+    // underscores. Force a UTF-8 locale (keep the user's if already UTF-8).
+    let lang = std::env::var("LANG")
+        .ok()
+        .filter(|l| l.to_ascii_uppercase().contains("UTF"))
+        .unwrap_or_else(|| "en_US.UTF-8".into());
+    cmd.env("LANG", &lang);
+    cmd.env("LC_CTYPE", &lang);
     if let Some(home) = dirs::home_dir() {
         cmd.cwd(home);
     }

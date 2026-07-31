@@ -1,6 +1,6 @@
 [package]
 name = "omniagent"
-version = "0.1.3"
+version = "0.1.4"
 description = "OmniAgent — a control tower for AI agent fleets across your servers"
 authors = ["SunBum Youn"]
 edition = "2021"
