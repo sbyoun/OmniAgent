@@ -68,9 +68,11 @@ pub fn pty_spawn(
             // Each pod gets its OWN named session on the server — opening a
             // host twice must create two independent sessions, never mirror
             // one. Falls back to a plain login shell when tmux is missing.
+            // `\; set-option status off`: the pod header already shows
+            // connection state, so hide tmux's own status bar.
             let remote_cmd = match &session {
                 Some(name) => format!(
-                    "tmux new-session -A -s '{}' 2>/dev/null || exec $SHELL -l",
+                    "tmux new-session -A -s '{}' \\; set-option status off 2>/dev/null || exec $SHELL -l",
                     name.replace('\'', "")
                 ),
                 None => "exec $SHELL -l".to_string(),
@@ -91,7 +93,7 @@ pub fn pty_spawn(
                         "-l",
                         "-c",
                         &format!(
-                            "command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s '{}' || exec \"{}\" -l",
+                            "command -v tmux >/dev/null 2>&1 && exec tmux new-session -A -s '{}' \\; set-option status off || exec \"{}\" -l",
                             name.replace('\'', ""),
                             shell
                         ),

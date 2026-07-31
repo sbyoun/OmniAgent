@@ -68,6 +68,15 @@ body,
   --dv-tabs-and-actions-container-height: 32px;
   --dv-activegroup-visiblepanel-tab-color: #e5e2e1;
   --dv-activegroup-hiddenpanel-tab-color: #8a919a;
+  /* Translucent drop preview shown while dragging a pod over a target */
+  --dv-drag-over-background-color: rgba(86, 156, 214, 0.22);
+  --dv-drag-over-border-color: #569cd6;
+}
+
+/* The pod header IS the tab (singleTabMode="fullwidth" stretches it when a
+   group holds one pod, which is the common case). */
+.dockview-theme-dark .dv-tab {
+  padding: 0;
 }
 
 .xterm .xterm-viewport {

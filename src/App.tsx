@@ -7,9 +7,10 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listSshHosts, SshHost } from "./ipc";
-import { PodParams, TerminalPod } from "./components/TerminalPod";
+import { PodParams, PodTab, TerminalPod } from "./components/TerminalPod";
 
 const components = { terminal: TerminalPod };
+const tabComponents = { pod: PodTab };
 
 const LAYOUT_KEY = "omniagent.layout.v1";
 // Pre-rename key, read once as a fallback so existing layouts migrate.
@@ -34,8 +35,13 @@ export default function App() {
     api.addPanel<PodParams>({
       id: `pod-${podCounter}`,
       component: "terminal",
+      tabComponent: "pod",
       title: host ? `[${host.toUpperCase()}]` : "[LOCAL]",
-      params: { host, label: host ? `${host} · SSH` : "LOCAL · SHELL" },
+      params: {
+        host,
+        label: host ? `${host} · SSH` : "LOCAL · SHELL",
+        status: "connecting",
+      },
       // Split right of the active group so pods tile into a grid instead of
       // stacking as tabs.
       position: api.activePanel
@@ -87,30 +93,51 @@ export default function App() {
     if (api.hasMaximizedGroup()) api.exitMaximizedGroup();
     const panels = [...api.panels];
     if (panels.length < 2) return;
-    // Gather every pod into the first group, then split back out row by row.
-    const first = panels[0];
-    for (let i = 1; i < panels.length; i++) {
-      panels[i].api.moveTo({ group: first.group, position: "center", index: i });
-    }
-    for (let i = 1; i < panels.length; i++) {
-      if (i % cols !== 0) {
-        panels[i].api.moveTo({ group: panels[i - 1].group, position: "right" });
-      } else {
-        panels[i].api.moveTo({ group: panels[i - cols].group, position: "bottom" });
+    try {
+      // Gather every pod into the first group, then split back out.
+      const first = panels[0];
+      for (let i = 1; i < panels.length; i++) {
+        if (panels[i].group !== first.group) {
+          panels[i].api.moveTo({
+            group: first.group,
+            position: "center",
+            index: i,
+          });
+        }
       }
+      // Split row LEADERS downward first (while each row still spans the
+      // full width), THEN fill rows rightward — otherwise an early right
+      // split leaves a column spanning every row.
+      for (let i = cols; i < panels.length; i += cols) {
+        panels[i].api.moveTo({
+          group: panels[i - cols].group,
+          position: "bottom",
+        });
+      }
+      for (let i = 1; i < panels.length; i++) {
+        if (i % cols !== 0) {
+          panels[i].api.moveTo({
+            group: panels[i - 1].group,
+            position: "right",
+          });
+        }
+      }
+      first.api.setActive();
+    } catch (e) {
+      console.error("[OmniAgent] preset layout failed:", e);
     }
-    first.api.setActive();
   };
 
-  /** Toggle-maximize the active pod. */
-  const toggleFocus = () => {
-    const api = apiRef.current;
-    if (!api) return;
-    if (api.hasMaximizedGroup()) {
-      api.exitMaximizedGroup();
-    } else if (api.activePanel) {
-      api.activePanel.api.maximize();
-    }
+  /** COLS: every pod side by side as vertical columns (one row). */
+  const applyColumns = () => {
+    const n = apiRef.current?.panels.length ?? 0;
+    if (n > 0) applyGrid(n);
+  };
+
+  /** AUTO: balanced grid — 2+ rows once there are enough pods (≈√N cols). */
+  const applyAuto = () => {
+    const n = apiRef.current?.panels.length ?? 0;
+    if (n > 0) applyGrid(Math.ceil(Math.sqrt(n)));
   };
 
   return (
@@ -248,8 +275,10 @@ export default function App() {
             )}
             <DockviewReact
               components={components}
+              tabComponents={tabComponents}
               onReady={onReady}
               theme={themeDark}
+              singleTabMode="fullwidth"
             />
           </main>
         </div>
@@ -269,24 +298,17 @@ export default function App() {
             <div className="flex bg-surface-container-highest rounded p-0.5 gap-0.5">
               <button
                 className="px-2 py-0.5 text-[11px] text-on-surface-variant hover:text-on-surface hover:bg-surface-variant rounded"
-                title="Tile pods in 2 columns"
-                onClick={() => applyGrid(2)}
+                title="All pods side by side as columns"
+                onClick={applyColumns}
               >
-                2x2
+                COLS
               </button>
               <button
                 className="px-2 py-0.5 text-[11px] text-on-surface-variant hover:text-on-surface hover:bg-surface-variant rounded"
-                title="Tile pods in 3 columns"
-                onClick={() => applyGrid(3)}
+                title="Balanced grid (2+ rows when there are enough pods)"
+                onClick={applyAuto}
               >
-                3-COL
-              </button>
-              <button
-                className="px-2 py-0.5 text-[11px] text-on-surface-variant hover:text-on-surface hover:bg-surface-variant rounded"
-                title="Maximize active pod (toggle)"
-                onClick={toggleFocus}
-              >
-                FOCUS
+                AUTO
               </button>
             </div>
             <div className="h-4 w-px bg-outline-variant" />

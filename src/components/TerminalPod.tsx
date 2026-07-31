@@ -1,4 +1,7 @@
-import { IDockviewPanelProps } from "dockview-react";
+import {
+  IDockviewPanelHeaderProps,
+  IDockviewPanelProps,
+} from "dockview-react";
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -13,12 +16,21 @@ import {
 import { Explorer } from "./Explorer";
 import { EditorPanel } from "./EditorPanel";
 
+export type PodStatus = "connecting" | "running" | "exited";
+
+/**
+ * Pod state shared between the panel (terminal body) and its tab (header).
+ * Lives in dockview params so both sides see updates and it serializes with
+ * the layout.
+ */
 export interface PodParams {
   host: string | null; // null = local shell
   label: string;
+  status?: PodStatus;
+  startedAt?: number;
+  explorerOpen?: boolean;
+  editorOpen?: boolean;
 }
-
-type PodStatus = "connecting" | "running" | "exited";
 
 const TERM_THEME = {
   background: "#0e0e0e",
@@ -37,17 +49,120 @@ const TERM_THEME = {
   brightRed: "#ffdad6",
 };
 
+/**
+ * The pod header, rendered as the dockview TAB — so grabbing anywhere on the
+ * header drags the pod, with dockview's translucent drop preview showing
+ * where it will land (top/bottom/left/right split or stack).
+ */
+export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
+  const {
+    label,
+    status = "connecting",
+    startedAt,
+    explorerOpen,
+    editorOpen,
+  } = props.params;
+  const [maximized, setMaximized] = useState(false);
+  const [, tick] = useState(0);
+
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    const sub = props.containerApi.onDidMaximizedGroupChange(() =>
+      setMaximized(props.api.isMaximized()),
+    );
+    return () => sub.dispose();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const dotClass =
+    status === "running"
+      ? "bg-secondary shadow-[0_0_8px_rgba(97,218,193,0.4)]"
+      : status === "connecting"
+        ? "bg-tertiary animate-pulse"
+        : "bg-error";
+
+  // Keep button clicks from starting a tab drag.
+  const guard = (e: React.MouseEvent) => e.stopPropagation();
+
+  const iconClass = (active: boolean | undefined) =>
+    `material-symbols-outlined text-[16px] cursor-pointer ${
+      active ? "text-primary" : "text-on-surface-variant hover:text-on-surface"
+    }`;
+
+  return (
+    <div className="flex items-center justify-between gap-4 h-full w-full px-3 cursor-grab active:cursor-grabbing select-none">
+      <div className="flex items-center gap-2 min-w-0">
+        <div className={`w-2 h-2 rounded-full shrink-0 ${dotClass}`} />
+        <span className="text-[11px] font-medium text-on-surface uppercase tracking-wider truncate">
+          {label}
+        </span>
+      </div>
+      <div className="flex items-center gap-3 shrink-0">
+        <span className="font-mono text-on-surface-variant text-[11px]">
+          {status === "exited"
+            ? "ENDED"
+            : startedAt
+              ? `UP ${formatUptime(Date.now() - startedAt)}`
+              : "…"}
+        </span>
+        <span
+          className={iconClass(explorerOpen)}
+          title="Toggle explorer"
+          onMouseDown={guard}
+          onClick={() =>
+            props.api.updateParameters({ explorerOpen: !explorerOpen })
+          }
+        >
+          folder_open
+        </span>
+        <span
+          className={iconClass(editorOpen)}
+          title="Toggle editor"
+          onMouseDown={guard}
+          onClick={() =>
+            props.api.updateParameters({ editorOpen: !editorOpen })
+          }
+        >
+          description
+        </span>
+        <span
+          className={iconClass(maximized)}
+          title={maximized ? "Restore pod" : "Maximize pod"}
+          onMouseDown={guard}
+          onClick={() => {
+            if (props.api.isMaximized()) {
+              props.api.exitMaximized();
+              setMaximized(false);
+            } else {
+              props.api.maximize();
+              setMaximized(true);
+            }
+          }}
+        >
+          {maximized ? "fullscreen_exit" : "fullscreen"}
+        </span>
+        <span
+          className="material-symbols-outlined text-[16px] cursor-pointer text-on-surface-variant hover:text-error"
+          title="Close pod (kills its session)"
+          onMouseDown={guard}
+          onClick={() => props.api.close()}
+        >
+          close
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
-  const { host, label } = props.params;
+  const { host, explorerOpen, editorOpen } = props.params;
   const podId = props.api.id;
   const containerRef = useRef<HTMLDivElement>(null);
-  const [status, setStatus] = useState<PodStatus>("connecting");
-  const [explorerOpen, setExplorerOpen] = useState(false);
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [maximized, setMaximized] = useState(false);
   const [editorPath, setEditorPath] = useState<string | null>(null);
-  const [startedAt] = useState(() => Date.now());
-  const [, tick] = useState(0);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -81,10 +196,15 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
         // the app is reopened.
         const session = `omniagent-${podId}`;
         await ptySpawn(podId, host, session, term.rows, term.cols);
-        if (!disposed) setStatus("running");
+        if (!disposed) {
+          props.api.updateParameters({
+            status: "running",
+            startedAt: Date.now(),
+          });
+        }
       } catch (e) {
         term.writeln(`\x1b[31m[OmniAgent] spawn failed: ${e}\x1b[0m`);
-        setStatus("exited");
+        props.api.updateParameters({ status: "exited" });
         return;
       }
 
@@ -102,7 +222,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
           if (Date.now() - spawnedAt > 5000) {
             props.api.close();
           } else {
-            setStatus("exited");
+            props.api.updateParameters({ status: "exited" });
             term.writeln("\r\n\x1b[90m[OmniAgent] session ended\x1b[0m");
           }
         }),
@@ -142,87 +262,8 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [podId, host]);
 
-  // Keep the maximize icon in sync when maximize state changes elsewhere
-  // (footer FOCUS preset, esc, another pod maximizing).
-  useEffect(() => {
-    const sub = props.containerApi.onDidMaximizedGroupChange(() =>
-      setMaximized(props.api.isMaximized()),
-    );
-    return () => sub.dispose();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Uptime ticker for the pod header.
-  useEffect(() => {
-    const t = setInterval(() => tick((n) => n + 1), 60_000);
-    return () => clearInterval(t);
-  }, []);
-
-  const uptime = formatUptime(Date.now() - startedAt);
-  const dotClass =
-    status === "running"
-      ? "bg-secondary shadow-[0_0_8px_rgba(97,218,193,0.4)]"
-      : status === "connecting"
-        ? "bg-tertiary animate-pulse"
-        : "bg-error";
-
   return (
     <div className="flex flex-col h-full bg-surface-container-low">
-      {/* Pod header */}
-      <div className="h-8 shrink-0 bg-surface-container border-b border-surface-container-highest flex items-center justify-between px-3">
-        <div className="flex items-center gap-2 min-w-0">
-          <div className={`w-2 h-2 rounded-full shrink-0 ${dotClass}`} />
-          <span className="text-[11px] font-medium text-on-surface uppercase tracking-wider truncate">
-            {label}
-          </span>
-        </div>
-        <div className="flex items-center gap-3 shrink-0">
-          <span className="font-mono text-on-surface-variant text-[11px]">
-            {status === "exited" ? "ENDED" : `UP ${uptime}`}
-          </span>
-          <span
-            className={`material-symbols-outlined text-[16px] cursor-pointer ${
-              explorerOpen
-                ? "text-primary"
-                : "text-on-surface-variant hover:text-on-surface"
-            }`}
-            title="Toggle explorer"
-            onClick={() => setExplorerOpen((v) => !v)}
-          >
-            folder_open
-          </span>
-          <span
-            className={`material-symbols-outlined text-[16px] cursor-pointer ${
-              editorOpen
-                ? "text-primary"
-                : "text-on-surface-variant hover:text-on-surface"
-            }`}
-            title="Toggle editor"
-            onClick={() => setEditorOpen((v) => !v)}
-          >
-            description
-          </span>
-          <span
-            className={`material-symbols-outlined text-[16px] cursor-pointer ${
-              maximized
-                ? "text-primary"
-                : "text-on-surface-variant hover:text-on-surface"
-            }`}
-            title={maximized ? "Restore pod" : "Maximize pod"}
-            onClick={() => {
-              if (props.api.isMaximized()) {
-                props.api.exitMaximized();
-                setMaximized(false);
-              } else {
-                props.api.maximize();
-                setMaximized(true);
-              }
-            }}
-          >
-            {maximized ? "fullscreen_exit" : "fullscreen"}
-          </span>
-        </div>
-      </div>
       {/* Pod body: explorer | (editor above / terminal below — VS Code style) */}
       <div className="flex flex-1 min-h-0">
         {explorerOpen && (
@@ -230,7 +271,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
             host={host}
             onOpenFile={(path) => {
               setEditorPath(path);
-              setEditorOpen(true);
+              props.api.updateParameters({ editorOpen: true });
             }}
           />
         )}
@@ -239,7 +280,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
             <EditorPanel
               host={host}
               path={editorPath}
-              onClose={() => setEditorOpen(false)}
+              onClose={() => props.api.updateParameters({ editorOpen: false })}
             />
           )}
           <div className="flex-1 min-h-0 bg-surface-container-lowest p-1">
