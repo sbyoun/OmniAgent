@@ -106,6 +106,113 @@ pub fn fs_write_file(host: Option<String>, path: String, content: String) -> Res
     }
 }
 
+#[tauri::command]
+pub fn fs_mkdir(host: Option<String>, path: String) -> Result<(), String> {
+    match host {
+        None => std::fs::create_dir(&path).map_err(|e| e.to_string()),
+        Some(h) => {
+            let output = ssh_base(&h)
+                .arg(format!("mkdir {}", shell_quote(&path)))
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+            Ok(())
+        }
+    }
+}
+
+#[tauri::command]
+pub fn fs_create_file(host: Option<String>, path: String) -> Result<(), String> {
+    match host {
+        None => {
+            if std::path::Path::new(&path).exists() {
+                return Err("already exists".into());
+            }
+            std::fs::write(&path, "").map_err(|e| e.to_string())
+        }
+        Some(h) => {
+            let q = shell_quote(&path);
+            let output = ssh_base(&h)
+                .arg(format!(
+                    "test -e {q} && echo EXISTS >&2 && exit 1; touch {q}"
+                ))
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+            Ok(())
+        }
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
+                16,
+            ) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+/// Upload raw file bytes dropped onto the explorer. Metadata travels in
+/// headers (`x-host`, percent-encoded `x-path`) so the body stays a plain
+/// binary payload.
+#[tauri::command]
+pub fn fs_upload(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let headers = request.headers();
+    let host = headers
+        .get("x-host")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let path = headers
+        .get("x-path")
+        .and_then(|v| v.to_str().ok())
+        .map(percent_decode)
+        .ok_or("missing x-path header")?;
+    let data = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.as_slice(),
+        _ => return Err("expected raw body".into()),
+    };
+    match host {
+        None => std::fs::write(&path, data).map_err(|e| e.to_string()),
+        Some(h) => {
+            let mut child = ssh_base(&h)
+                .arg(format!("cat > {}", shell_quote(&path)))
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            child
+                .stdin
+                .take()
+                .ok_or("no stdin")?
+                .write_all(data)
+                .map_err(|e| e.to_string())?;
+            let output = child.wait_with_output().map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Default working directory for a pod's explorer: $HOME locally, `~` resolved
 /// remotely.
 #[tauri::command]

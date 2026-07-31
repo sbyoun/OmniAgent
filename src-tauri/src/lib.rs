@@ -17,6 +17,9 @@ pub fn run() {
             remote_fs::fs_read_file,
             remote_fs::fs_write_file,
             remote_fs::fs_home_dir,
+            remote_fs::fs_mkdir,
+            remote_fs::fs_create_file,
+            remote_fs::fs_upload,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

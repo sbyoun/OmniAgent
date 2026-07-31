@@ -72,9 +72,11 @@ pub fn pty_spawn(
             // connection state, so hide tmux's own status bar.
             // `-u` forces UTF-8 handling even when the login environment has
             // no UTF-8 locale set.
+            // `set-option mouse on`: wheel scrolls tmux scrollback instead of
+            // being translated into arrow keys (shell history).
             let remote_cmd = match &session {
                 Some(name) => format!(
-                    "tmux -u new-session -A -s '{}' \\; set-option status off 2>/dev/null || exec $SHELL -l",
+                    "tmux -u new-session -A -s '{}' \\; set-option status off \\; set-option mouse on 2>/dev/null || exec $SHELL -l",
                     name.replace('\'', "")
                 ),
                 None => "exec $SHELL -l".to_string(),
@@ -95,7 +97,7 @@ pub fn pty_spawn(
                         "-l",
                         "-c",
                         &format!(
-                            "command -v tmux >/dev/null 2>&1 && exec tmux -u new-session -A -s '{}' \\; set-option status off || exec \"{}\" -l",
+                            "command -v tmux >/dev/null 2>&1 && exec tmux -u new-session -A -s '{}' \\; set-option status off \\; set-option mouse on || exec \"{}\" -l",
                             name.replace('\'', ""),
                             shell
                         ),

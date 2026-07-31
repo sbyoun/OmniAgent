@@ -43,6 +43,20 @@ export const fsWriteFile = (host: string | null, path: string, content: string) 
 export const fsHomeDir = (host: string | null) =>
   invoke<string>("fs_home_dir", { host });
 
+export const fsMkdir = (host: string | null, path: string) =>
+  invoke<void>("fs_mkdir", { host, path });
+
+export const fsCreateFile = (host: string | null, path: string) =>
+  invoke<void>("fs_create_file", { host, path });
+
+export const fsUpload = (host: string | null, path: string, data: ArrayBuffer) =>
+  invoke<void>("fs_upload", new Uint8Array(data), {
+    headers: {
+      "x-host": host ?? "",
+      "x-path": encodeURIComponent(path),
+    },
+  });
+
 export const onPtyOutput = (
   cb: (payload: { id: string; data: string }) => void,
 ): Promise<UnlistenFn> =>
