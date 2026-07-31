@@ -23,6 +23,21 @@ Existing tools cover halves of this problem:
 OmniAgent does both: zero-config SSH fleet discovery, persistent agent sessions,
 and a control-tower UI designed for watching many agents work in parallel.
 
+### How it compares
+
+| | Terminal grid | SSH manager | Explorer + editor **per terminal** | Sessions restore **with content** | Agent fleet focus |
+|---|:-:|:-:|:-:|:-:|:-:|
+| iTerm2 / WezTerm / Warp | ✅ | ➖ | ❌ | manual `tmux -CC` | ❌ |
+| Tabby / Termius | ✅ | ✅ | basic SFTP, separate view | ❌ | ❌ |
+| MobaXterm *(Windows)* | tabs | ✅ | ✅ | ❌ | ❌ |
+| VS Code Remote-SSH | ➖ | one host at a time | ✅ | ❌ | ❌ |
+| tmux dashboards (TmuxCC, …) | TUI | ❌ | ❌ | ✅ | ✅ local only |
+| **OmniAgent** | ✅ | ✅ zero-config | ✅ docked in every pod | ✅ by default | ✅ across servers |
+
+The last column is where OmniAgent is headed: agent status detection,
+needs-input notifications, and fleet-wide agent instructions are the
+[current milestone](https://github.com/sbyoun/OmniAgent/milestones).
+
 ## Features
 
 - **Zero-config fleet** — your `~/.ssh/config` *is* the server list. No accounts,
