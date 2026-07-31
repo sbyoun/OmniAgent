@@ -32,6 +32,145 @@ export interface PodParams {
   editorOpen?: boolean;
 }
 
+/**
+ * WKWebView's Korean IME never fires composition events — it rewrites the
+ * hidden textarea through plain `input` events (isComposing=false) with
+ * keyCode-229 keydowns, replacing the composing tail in place (ㅎ→하→한).
+ * xterm's built-in handling emits only the first jamo of each syllable and
+ * drops the composed character. This bridge takes over text insertion:
+ * printable keys are routed through the textarea and emitted from value
+ * diffs — the last char is held while it may still be composing and is
+ * flushed on syllable boundaries, ASCII input, or control keys. Control
+ * keys (Enter, arrows, shortcuts) keep xterm's normal path.
+ */
+function setupImeBridge(term: Terminal, rawSend: (data: string) => void) {
+  const ta = term.textarea;
+  if (!ta) return;
+  let committed = 0;
+
+  // WebKit inserts non-breaking spaces (U+00A0) into the textarea where the
+  // user typed plain spaces — invisible in logs, but the shell treats
+  // "cd wo" as ONE word, silently breaking completion and commands.
+  const send = (data: string) => rawSend(data.replace(/\u00a0/g, " "));
+
+  const isComposable = (code: number) =>
+    (code >= 0x1100 && code <= 0x11ff) || // Hangul Jamo
+    (code >= 0x3130 && code <= 0x318f) || // Compatibility Jamo
+    (code >= 0xac00 && code <= 0xd7a3); // Hangul Syllables
+
+  const resetIfIdle = () => {
+    if (committed >= ta.value.length) {
+      ta.value = "";
+      committed = 0;
+    }
+  };
+
+  const flushPending = () => {
+    if (ta.value.length > committed) {
+      send(ta.value.slice(committed));
+      committed = ta.value.length;
+    }
+    resetIfIdle();
+  };
+
+  // Keep keyCode-229 keydowns away from xterm entirely: its
+  // CompositionHelper arms a textarea-diff timer on 229 that races this
+  // bridge and double-emits characters. The default action still reaches
+  // the textarea, which is all the IME needs.
+  // Track whether a Backspace press was actually handled this cycle —
+  // WebKit sometimes swallows the keydown whole (only a keyup arrives),
+  // especially right after a composition, and the deletion would be lost.
+  let bsHandled = false;
+  term.element?.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.keyCode === 229) {
+        // IME-mediated Backspace edits the composing tail locally.
+        if (e.key === "Backspace") bsHandled = true;
+        e.stopPropagation();
+      }
+    },
+    { capture: true },
+  );
+  term.element?.addEventListener(
+    "keyup",
+    (e) => {
+      if (e.keyCode === 8 || e.key === "Backspace") {
+        if (!bsHandled) send("\x7f");
+        bsHandled = false;
+      }
+    },
+    { capture: true },
+  );
+
+  const MODIFIER_KEYS = new Set([
+    "Shift",
+    "Control",
+    "Alt",
+    "Meta",
+    "CapsLock",
+    "Dead",
+  ]);
+
+  term.attachCustomKeyEventHandler((ev) => {
+    const printable =
+      ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey;
+    // The input-diff path owns printable characters on every event type —
+    // otherwise xterm's keypress handler emits them a second time.
+    if (ev.type === "keypress") return !printable;
+    if (ev.type !== "keydown") return true;
+    if (printable) return false;
+    // Bare modifiers must NOT finalize the syllable being composed —
+    // Shift is literally part of typing ㅆ/ㅃ/ㅆ받침.
+    if (MODIFIER_KEYS.has(ev.key)) return true;
+    if (ev.keyCode === 8) {
+      // Composing: Backspace edits the tail locally in the textarea.
+      if (ta.value.length > committed) {
+        bsHandled = true;
+        return false;
+      }
+      // Otherwise xterm sends \x7f to the terminal.
+      bsHandled = true;
+      flushPending();
+      return true;
+    }
+    // Any other control key finalizes the pending syllable first.
+    flushPending();
+    return true;
+  });
+
+  term.element?.addEventListener(
+    "input",
+    (e) => {
+      if (e.target !== ta) return;
+      // We own insertText emission; keep xterm's handler out of it.
+      e.stopPropagation();
+      const val = ta.value;
+      if (val.length < committed) {
+        committed = val.length;
+        return;
+      }
+      if (val.length === committed) return;
+      const lastCode = val.charCodeAt(val.length - 1);
+      // Hold the last char while it may still be composing.
+      const finalTo = isComposable(lastCode) ? val.length - 1 : val.length;
+      if (finalTo > committed) {
+        send(val.slice(committed, finalTo));
+        committed = finalTo;
+      }
+      resetIfIdle();
+    },
+    { capture: true },
+  );
+
+  // xterm clears its textarea on focus — resync.
+  ta.addEventListener("focus", () => {
+    setTimeout(() => {
+      committed = Math.min(committed, ta.value.length);
+    }, 0);
+  });
+}
+
 const TERM_THEME = {
   background: "#0e0e0e",
   foreground: "#e5e2e1",
@@ -229,9 +368,19 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       );
     });
 
-    const dataSub = term.onData((data) => {
-      ptyWrite(podId, data).catch(() => {});
-    });
+    // Serialize ALL pty writes through one promise chain: xterm's own
+    // emissions and the IME bridge's are separate async invokes, and
+    // out-of-order delivery (e.g. a Tab overtaking a flushed syllable)
+    // corrupts the shell's input state.
+    let writeChain: Promise<unknown> = Promise.resolve();
+    const write = (data: string) => {
+      if (!data) return;
+      writeChain = writeChain.then(() =>
+        ptyWrite(podId, data).catch(() => {}),
+      );
+    };
+    const dataSub = term.onData(write);
+    setupImeBridge(term, write);
 
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const observer = new ResizeObserver(() => {
