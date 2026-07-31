@@ -65,11 +65,22 @@ npm run tauri build  # production bundle
 On first launch the sidebar lists every concrete `Host` from your
 `~/.ssh/config`. Click one (or *Local Terminal*) to launch a pod.
 
-## Status
+## Status & roadmap
 
 Early but functional — built and daily-driven on macOS. Windows/Linux are
-untested. Roadmap: agent status detection (idle / working / needs-input),
-pod notifications, per-pod resource meters, remote named sessions.
+untested.
+
+Development is tracked on the [issue tracker](https://github.com/sbyoun/OmniAgent/issues)
+and grouped into [milestones](https://github.com/sbyoun/OmniAgent/milestones):
+
+- **v0.2.0 — Control Tower Core**: [`FLEET.md` unified agent instructions](https://github.com/sbyoun/OmniAgent/issues/1),
+  [agent status detection](https://github.com/sbyoun/OmniAgent/issues/2),
+  [needs-input notifications](https://github.com/sbyoun/OmniAgent/issues/3)
+- **v0.3.0 — Fleet Operations**: [broadcast dispatch](https://github.com/sbyoun/OmniAgent/issues/4),
+  [fleet journal](https://github.com/sbyoun/OmniAgent/issues/5),
+  [remote named sessions](https://github.com/sbyoun/OmniAgent/issues/6)
+
+Issues and PRs welcome.
 
 ## License
 
