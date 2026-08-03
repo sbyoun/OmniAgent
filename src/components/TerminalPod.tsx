@@ -37,6 +37,22 @@ class TmuxFriendlyClipboardProvider extends BrowserClipboardProvider {
 }
 
 export type PodStatus = "connecting" | "running" | "exited";
+export type PodActivity = "working" | "idle" | "attention";
+
+/** How long output must stay quiet before a working pod counts as idle. */
+const IDLE_AFTER_MS = 4000;
+
+/** Prompts that mean the agent is waiting on the human. */
+const ATTENTION_RE =
+  /(\[y\/n\]|\(y\/n\)|\[y\/N\]|do you want|proceed\?|continue\?|are you sure|press enter|password:|passphrase|permission|허용|계속할까요|진행할까요|1\. yes)/i;
+
+/** Strip OSC/CSI/charset escape sequences so patterns match visible text. */
+function stripAnsi(s: string): string {
+  return s
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+    .replace(/\x1b[()][0-9A-Za-z]/g, "");
+}
 
 /**
  * Pod state shared between the panel (terminal body) and its tab (header).
@@ -47,6 +63,7 @@ export interface PodParams {
   host: string | null; // null = local shell
   label: string;
   status?: PodStatus;
+  activity?: PodActivity;
   startedAt?: number;
   explorerOpen?: boolean;
   editorOpen?: boolean;
@@ -217,6 +234,7 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
   const {
     label,
     status = "connecting",
+    activity = "idle",
     startedAt,
     explorerOpen,
     editorOpen,
@@ -238,11 +256,15 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
   }, []);
 
   const dotClass =
-    status === "running"
-      ? "bg-secondary shadow-[0_0_8px_rgba(97,218,193,0.4)]"
+    status === "exited"
+      ? "bg-error"
       : status === "connecting"
         ? "bg-tertiary animate-pulse"
-        : "bg-error";
+        : activity === "attention"
+          ? "bg-[#ffb960] shadow-[0_0_10px_rgba(255,185,96,0.7)] animate-pulse"
+          : activity === "working"
+            ? "bg-secondary shadow-[0_0_8px_rgba(97,218,193,0.4)]"
+            : "bg-outline";
 
   // Keep button clicks from starting a tab drag.
   const guard = (e: React.MouseEvent) => e.stopPropagation();
@@ -261,6 +283,11 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
         </span>
       </div>
       <div className="flex items-center gap-3 shrink-0">
+        {status === "running" && activity === "attention" && (
+          <span className="text-[10px] font-semibold tracking-wider text-[#ffb960] bg-[#ffb960]/15 px-1.5 py-0.5 rounded animate-pulse">
+            NEEDS INPUT
+          </span>
+        )}
         <span className="font-mono text-on-surface-variant text-[11px]">
           {status === "exited"
             ? "ENDED"
@@ -349,6 +376,44 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
 
     const spawnedAt = Date.now();
 
+    // ---- Agent activity detection (#2): working / idle / needs-input ----
+    let activity: PodActivity = "idle";
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let plainTail = "";
+    const setActivity = (a: PodActivity) => {
+      if (a !== activity && !disposed) {
+        activity = a;
+        props.api.updateParameters({ activity: a });
+      }
+    };
+    const trackActivity = (data: string) => {
+      const plain = stripAnsi(data);
+      const rangBell = plain.includes("\x07");
+      plainTail = (plainTail + plain.replace(/\x07/g, "")).slice(-600);
+      const visibleTail = plainTail.replace(/\s+/g, " ").trim().slice(-300);
+      clearTimeout(idleTimer);
+      if (rangBell || ATTENTION_RE.test(visibleTail)) {
+        setActivity("attention");
+      } else {
+        setActivity("working");
+        idleTimer = setTimeout(() => {
+          if (activity === "working") setActivity("idle");
+        }, IDLE_AFTER_MS);
+      }
+    };
+    // The human responding releases the attention state (and clears the
+    // tail so the old prompt text can't re-trigger it).
+    const onUserInput = () => {
+      if (activity === "attention") {
+        plainTail = "";
+        setActivity("working");
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          if (activity === "working") setActivity("idle");
+        }, IDLE_AFTER_MS);
+      }
+    };
+
     // Fit after first layout, then spawn the PTY at the fitted size.
     requestAnimationFrame(async () => {
       if (disposed) return;
@@ -374,7 +439,9 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
 
       unlisteners.push(
         await onPtyOutput(({ id, data }) => {
-          if (id === podId) term.write(data);
+          if (id !== podId) return;
+          term.write(data);
+          trackActivity(data);
         }),
       );
       unlisteners.push(
@@ -400,6 +467,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     let writeChain: Promise<unknown> = Promise.resolve();
     const write = (data: string) => {
       if (!data) return;
+      onUserInput();
       writeChain = writeChain.then(() =>
         ptyWrite(podId, data).catch(() => {}),
       );
@@ -425,6 +493,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
 
     return () => {
       disposed = true;
+      clearTimeout(idleTimer);
       clearTimeout(resizeTimer);
       observer.disconnect();
       dataSub.dispose();

@@ -18,14 +18,52 @@ const LEGACY_LAYOUT_KEY = "omniterm.layout.v1";
 
 let podCounter = 0;
 
+interface FleetSummary {
+  working: number;
+  idle: number;
+  attention: number;
+  total: number;
+}
+
 export default function App() {
   const [hosts, setHosts] = useState<SshHost[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [podCount, setPodCount] = useState(0);
+  const [fleet, setFleet] = useState<FleetSummary>({
+    working: 0,
+    idle: 0,
+    attention: 0,
+    total: 0,
+  });
   const apiRef = useRef<DockviewApi | null>(null);
 
   useEffect(() => {
     listSshHosts().then(setHosts).catch(console.error);
+  }, []);
+
+  // Fleet health summary: poll pod activity params (cheap — a handful of
+  // pods) so the header always shows who is working and who is stuck.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const panels = apiRef.current?.panels ?? [];
+      const s: FleetSummary = { working: 0, idle: 0, attention: 0, total: panels.length };
+      for (const p of panels) {
+        const prm = p.params as PodParams | undefined;
+        if (prm?.status !== "running") continue;
+        if (prm.activity === "attention") s.attention++;
+        else if (prm.activity === "working") s.working++;
+        else s.idle++;
+      }
+      setFleet((prev) =>
+        prev.working === s.working &&
+        prev.idle === s.idle &&
+        prev.attention === s.attention &&
+        prev.total === s.total
+          ? prev
+          : s,
+      );
+    }, 1000);
+    return () => clearInterval(t);
   }, []);
 
   const openPod = (host: string | null) => {
@@ -212,7 +250,25 @@ export default function App() {
             <span className="text-outline-variant">/</span>
             <span className="text-on-surface font-medium">Global Fleet</span>
           </div>
-          <div className="flex items-center gap-2 text-on-surface-variant">
+          <div className="flex items-center gap-4 text-on-surface-variant">
+            {fleet.attention > 0 && (
+              <span className="flex items-center gap-1.5 text-[11px] font-semibold text-[#ffb960] animate-pulse">
+                <span className="w-2 h-2 rounded-full bg-[#ffb960]" />
+                {fleet.attention} NEEDS INPUT
+              </span>
+            )}
+            {fleet.working > 0 && (
+              <span className="flex items-center gap-1.5 text-[11px] font-medium text-secondary">
+                <span className="w-2 h-2 rounded-full bg-secondary" />
+                {fleet.working} WORKING
+              </span>
+            )}
+            {fleet.idle > 0 && (
+              <span className="flex items-center gap-1.5 text-[11px] text-on-surface-variant">
+                <span className="w-2 h-2 rounded-full bg-outline" />
+                {fleet.idle} IDLE
+              </span>
+            )}
             <span className="font-mono text-[11px]">
               {podCount} POD{podCount === 1 ? "" : "S"}
             </span>
