@@ -28,7 +28,11 @@ pub fn fs_list_dir(host: Option<String>, path: String) -> Result<Vec<DirEntry>, 
             let mut out = Vec::new();
             let entries = std::fs::read_dir(&path).map_err(|e| e.to_string())?;
             for e in entries.flatten() {
-                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                // metadata() follows symlinks, so a linked directory counts
+                // as a directory (file_type() would call it a file).
+                let is_dir = std::fs::metadata(e.path())
+                    .map(|m| m.is_dir())
+                    .unwrap_or(false);
                 out.push(DirEntry {
                     name: e.file_name().to_string_lossy().to_string(),
                     is_dir,
@@ -38,8 +42,10 @@ pub fn fs_list_dir(host: Option<String>, path: String) -> Result<Vec<DirEntry>, 
             Ok(out)
         }
         Some(h) => {
+            // -L dereferences symlinks so linked directories get the `/`
+            // marker from -p too.
             let output = ssh_base(&h)
-                .arg(format!("ls -1Ap {}", shell_quote(&path)))
+                .arg(format!("ls -1ALp {}", shell_quote(&path)))
                 .output()
                 .map_err(|e| e.to_string())?;
             if !output.status.success() {

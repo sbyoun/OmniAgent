@@ -149,6 +149,25 @@ function setupImeBridge(term: Terminal, rawSend: (data: string) => void) {
     "Dead",
   ]);
 
+  // macOS-style editing shortcuts → shell control sequences (what iTerm's
+  // "Natural text editing" preset does): ⌘⌫ kills the line, ⌥⌫ the word,
+  // ⌘←/→ jump to line start/end, ⌥←/→ move by word, ⌥⌦ deletes forward.
+  const macEditSequence = (ev: KeyboardEvent): string | null => {
+    const backspace = ev.keyCode === 8 || ev.key === "Backspace";
+    if (ev.metaKey && !ev.altKey && !ev.ctrlKey) {
+      if (backspace) return "\x15"; // ^U
+      if (ev.key === "ArrowLeft") return "\x01"; // ^A
+      if (ev.key === "ArrowRight") return "\x05"; // ^E
+    }
+    if (ev.altKey && !ev.metaKey && !ev.ctrlKey) {
+      if (backspace) return "\x17"; // ^W
+      if (ev.key === "ArrowLeft") return "\x1bb";
+      if (ev.key === "ArrowRight") return "\x1bf";
+      if (ev.key === "Delete") return "\x1bd";
+    }
+    return null;
+  };
+
   term.attachCustomKeyEventHandler((ev) => {
     const printable =
       ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey && !ev.altKey;
@@ -156,6 +175,14 @@ function setupImeBridge(term: Terminal, rawSend: (data: string) => void) {
     // otherwise xterm's keypress handler emits them a second time.
     if (ev.type === "keypress") return !printable;
     if (ev.type !== "keydown") return true;
+    const seq = macEditSequence(ev);
+    if (seq) {
+      ev.preventDefault();
+      flushPending();
+      send(seq);
+      bsHandled = true;
+      return false;
+    }
     if (printable) return false;
     // Bare modifiers must NOT finalize the syllable being composed —
     // Shift is literally part of typing ㅆ/ㅃ/ㅆ받침.
