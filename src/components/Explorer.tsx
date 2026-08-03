@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DirEntry,
   fsCreateFile,
+  fsDownload,
   fsHomeDir,
   fsListDir,
   fsMkdir,
@@ -21,6 +22,7 @@ export function Explorer({ host, onOpenFile }: Props) {
   const [creating, setCreating] = useState<null | "file" | "dir">(null);
   const [newName, setNewName] = useState("");
   const [uploading, setUploading] = useState<string[]>([]);
+  const [downloaded, setDownloaded] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const dragTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -200,6 +202,14 @@ export function Explorer({ host, onOpenFile }: Props) {
             />
           </div>
         )}
+        {downloaded && (
+          <div className="px-1 mb-0.5 text-[10px] text-secondary flex items-center gap-1">
+            <span className="material-symbols-outlined text-[12px]">
+              check_circle
+            </span>
+            <span className="truncate">{downloaded} → ~/Downloads</span>
+          </div>
+        )}
         {uploading.length > 0 && (
           <div className="px-1 mb-0.5 text-[10px] text-primary flex items-center gap-1">
             <span className="material-symbols-outlined text-[12px] animate-spin">
@@ -219,7 +229,7 @@ export function Explorer({ host, onOpenFile }: Props) {
           entries.map((e) => (
             <div
               key={e.name}
-              className="flex items-center gap-1 hover:bg-surface-container-high px-1 rounded cursor-pointer mb-0.5 whitespace-nowrap"
+              className="group flex items-center gap-1 hover:bg-surface-container-high px-1 rounded cursor-pointer mb-0.5 whitespace-nowrap"
               onClick={() =>
                 e.is_dir ? load(joinCwd(e.name)) : onOpenFile(joinCwd(e.name))
               }
@@ -231,7 +241,24 @@ export function Explorer({ host, onOpenFile }: Props) {
               >
                 {e.is_dir ? "folder" : "draft"}
               </span>
-              <span className="truncate">{e.name}</span>
+              <span className="truncate flex-1">{e.name}</span>
+              {!e.is_dir && (
+                <span
+                  className="material-symbols-outlined text-[13px] text-on-surface-variant hover:text-primary opacity-0 group-hover:opacity-100 shrink-0"
+                  title="Download to ~/Downloads"
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    fsDownload(host, joinCwd(e.name))
+                      .then((to) => {
+                        setDownloaded(to.replace(/^.*\//, ""));
+                        setTimeout(() => setDownloaded(null), 2500);
+                      })
+                      .catch((err) => setError(String(err)));
+                  }}
+                >
+                  download
+                </span>
+              )}
             </div>
           ))}
       </div>

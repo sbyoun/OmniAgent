@@ -1,6 +1,8 @@
 import Editor, { OnMount } from "@monaco-editor/react";
-import { useEffect, useRef, useState } from "react";
-import { fsReadFile, fsWriteFile } from "../ipc";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
+import { fsDownload, fsReadFile, fsWriteFile } from "../ipc";
 
 interface Props {
   host: string | null;
@@ -14,14 +16,22 @@ export function EditorPanel({ host, path, onClose }: Props) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("clean");
+  const [preview, setPreview] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [saved, setSaved] = useState<string | null>(null);
   const valueRef = useRef("");
   const saveRef = useRef<() => void>(() => {});
+  const previewRef = useRef<HTMLDivElement>(null);
+
+  const isMarkdown = !!path && /\.(md|markdown|mdx)$/i.test(path);
 
   useEffect(() => {
     if (!path) return;
     setContent(null);
     setError(null);
     setSaveState("clean");
+    // Markdown opens in preview; code opens in the editor.
+    setPreview(/\.(md|markdown|mdx)$/i.test(path));
     fsReadFile(host, path)
       .then((text) => {
         valueRef.current = text;
@@ -29,6 +39,52 @@ export function EditorPanel({ host, path, onClose }: Props) {
       })
       .catch((e) => setError(String(e)));
   }, [host, path]);
+
+  const previewHtml = useMemo(() => {
+    if (!preview || content === null) return "";
+    return DOMPurify.sanitize(marked.parse(content, { async: false }) as string);
+  }, [preview, content]);
+
+  /**
+   * In preview mode copy what the user SEES: rich text (HTML flavor) plus a
+   * readable plain-text fallback. In source mode copy the raw file. Feedback
+   * is optimistic — the clipboard write is not awaited before showing ✓, so
+   * large files don't feel laggy.
+   */
+  const copyAll = () => {
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+    const done = (p: Promise<unknown>) => p.catch((e) => setError(String(e)));
+    if (preview && previewRef.current) {
+      const html = previewRef.current.innerHTML;
+      const text = previewRef.current.innerText;
+      if (typeof ClipboardItem !== "undefined" && navigator.clipboard?.write) {
+        done(
+          navigator.clipboard.write([
+            new ClipboardItem({
+              "text/html": new Blob([html], { type: "text/html" }),
+              "text/plain": new Blob([text], { type: "text/plain" }),
+            }),
+          ]),
+        );
+      } else {
+        done(navigator.clipboard.writeText(text));
+      }
+      return;
+    }
+    done(navigator.clipboard.writeText(valueRef.current));
+  };
+
+  const download = async () => {
+    if (!path) return;
+    try {
+      const to = await fsDownload(host, path);
+      setSaved(to.replace(/^.*\/Downloads\//, "~/Downloads/"));
+      setTimeout(() => setSaved(null), 2500);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
 
   saveRef.current = async () => {
     if (!path) return;
@@ -65,8 +121,48 @@ export function EditorPanel({ host, path, onClose }: Props) {
             <span className="text-secondary"> saved</span>
           )}
         </span>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
+          {saved && (
+            <span className="text-[10px] text-secondary truncate max-w-[160px]">
+              saved to {saved}
+            </span>
+          )}
+          {path && isMarkdown && (
+            <span
+              className={`material-symbols-outlined text-[14px] cursor-pointer ${
+                preview
+                  ? "text-primary"
+                  : "text-on-surface-variant hover:text-on-surface"
+              }`}
+              title={preview ? "Edit source" : "Preview markdown"}
+              onClick={() => setPreview((v) => !v)}
+            >
+              {preview ? "code" : "visibility"}
+            </span>
+          )}
           {path && (
+            <span
+              className={`material-symbols-outlined text-[14px] cursor-pointer ${
+                copied
+                  ? "text-secondary"
+                  : "text-on-surface-variant hover:text-on-surface"
+              }`}
+              title="Copy entire file"
+              onClick={copyAll}
+            >
+              {copied ? "check" : "content_copy"}
+            </span>
+          )}
+          {path && (
+            <span
+              className="material-symbols-outlined text-[14px] text-on-surface-variant hover:text-on-surface cursor-pointer"
+              title="Download to ~/Downloads"
+              onClick={download}
+            >
+              download
+            </span>
+          )}
+          {path && !preview && (
             <span
               className="material-symbols-outlined text-[14px] text-on-surface-variant hover:text-on-surface cursor-pointer"
               title="Save (⌘S)"
@@ -95,6 +191,12 @@ export function EditorPanel({ host, path, onClose }: Props) {
           </div>
         ) : content === null ? (
           <div className="p-3 text-outline text-[11px] font-mono">loading…</div>
+        ) : preview ? (
+          <div
+            ref={previewRef}
+            className="markdown-preview h-full overflow-auto px-4 py-3 select-text"
+            dangerouslySetInnerHTML={{ __html: previewHtml }}
+          />
         ) : (
           <Editor
             theme="vs-dark"

@@ -49,6 +49,10 @@ export const fsMkdir = (host: string | null, path: string) =>
 export const fsCreateFile = (host: string | null, path: string) =>
   invoke<void>("fs_create_file", { host, path });
 
+/** Copies the file into ~/Downloads and resolves with the saved path. */
+export const fsDownload = (host: string | null, path: string) =>
+  invoke<string>("fs_download", { host, path });
+
 export const fsUpload = (host: string | null, path: string, data: ArrayBuffer) =>
   invoke<void>("fs_upload", new Uint8Array(data), {
     headers: {

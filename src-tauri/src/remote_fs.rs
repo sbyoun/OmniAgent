@@ -219,6 +219,43 @@ pub fn fs_upload(request: tauri::ipc::Request<'_>) -> Result<(), String> {
     }
 }
 
+/// Copy a file into ~/Downloads (fetching it over ssh for remote pods).
+/// Returns the saved path. Never overwrites: collisions get ` (2)`, ` (3)`…
+#[tauri::command]
+pub fn fs_download(host: Option<String>, path: String) -> Result<String, String> {
+    let dir = dirs::home_dir().ok_or("no home dir")?.join("Downloads");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let name = path.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("download");
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.to_string(), String::new()),
+    };
+    let mut target = dir.join(name);
+    let mut n = 2;
+    while target.exists() {
+        target = dir.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+
+    match host {
+        None => {
+            std::fs::copy(&path, &target).map_err(|e| e.to_string())?;
+        }
+        Some(h) => {
+            let output = ssh_base(&h)
+                .arg(format!("cat {}", shell_quote(&path)))
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+            std::fs::write(&target, &output.stdout).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(target.to_string_lossy().to_string())
+}
+
 /// Default working directory for a pod's explorer: $HOME locally, `~` resolved
 /// remotely.
 #[tauri::command]
