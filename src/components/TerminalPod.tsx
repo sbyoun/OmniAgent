@@ -6,6 +6,10 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import {
+  BrowserClipboardProvider,
+  ClipboardAddon,
+} from "@xterm/addon-clipboard";
+import {
   onPtyExit,
   onPtyOutput,
   ptyKill,
@@ -15,6 +19,22 @@ import {
 } from "../ipc";
 import { Explorer } from "./Explorer";
 import { EditorPanel } from "./EditorPanel";
+
+/**
+ * tmux emits its copies as `OSC 52 ; ; <base64>` — an EMPTY selection field —
+ * which the default provider silently ignores (it only honors "c"). Treat
+ * empty as the system clipboard.
+ */
+class TmuxFriendlyClipboardProvider extends BrowserClipboardProvider {
+  public override writeText(selection: never, text: string): Promise<void> {
+    const sel = ((selection as string) === "" ? "c" : selection) as never;
+    return super.writeText(sel, text);
+  }
+  public override readText(selection: never): Promise<string> {
+    const sel = ((selection as string) === "" ? "c" : selection) as never;
+    return super.readText(sel);
+  }
+}
 
 export type PodStatus = "connecting" | "running" | "exited";
 
@@ -317,6 +337,11 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    // OSC 52 → system clipboard, so tmux copy-mode / mouse-drag copies
+    // (set-clipboard on) actually land in the macOS clipboard (#13).
+    term.loadAddon(
+      new ClipboardAddon(undefined, new TmuxFriendlyClipboardProvider()),
+    );
     term.open(el);
 
     let disposed = false;
@@ -447,3 +472,4 @@ function formatUptime(ms: number): string {
   const m = mins % 60;
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
+

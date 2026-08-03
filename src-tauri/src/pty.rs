@@ -76,7 +76,7 @@ pub fn pty_spawn(
             // being translated into arrow keys (shell history).
             let remote_cmd = match &session {
                 Some(name) => format!(
-                    "tmux -u new-session -A -s '{}' \\; set-option status off \\; set-option mouse on 2>/dev/null || exec $SHELL -l",
+                    "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; new-session -A -s '{}' \\; set-option status off \\; set-option mouse on 2>/dev/null || exec $SHELL -l",
                     name.replace('\'', "")
                 ),
                 None => "exec $SHELL -l".to_string(),
@@ -97,7 +97,7 @@ pub fn pty_spawn(
                         "-l",
                         "-c",
                         &format!(
-                            "command -v tmux >/dev/null 2>&1 && exec tmux -u new-session -A -s '{}' \\; set-option status off \\; set-option mouse on || exec \"{}\" -l",
+                            "command -v tmux >/dev/null 2>&1 && exec tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; new-session -A -s '{}' \\; set-option status off \\; set-option mouse on || exec \"{}\" -l",
                             name.replace('\'', ""),
                             shell
                         ),
