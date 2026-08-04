@@ -7,6 +7,8 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listSshHosts, SshHost } from "./ipc";
+import { HostStats, subscribeHostStats } from "./hostStats";
+import { setSetting, useSettings } from "./settings";
 import { PodParams, PodTab, TerminalPod } from "./components/TerminalPod";
 
 const components = { terminal: TerminalPod };
@@ -40,6 +42,17 @@ export default function App() {
   useEffect(() => {
     listSshHosts().then(setHosts).catch(console.error);
   }, []);
+
+  // This machine's load, shown in the footer.
+  const [localStats, setLocalStats] = useState<HostStats | null>(null);
+  const settings = useSettings();
+  useEffect(() => {
+    if (!settings.meters) {
+      setLocalStats(null);
+      return;
+    }
+    return subscribeHostStats(null, setLocalStats);
+  }, [settings.meters]);
 
   // Fleet health summary: poll pod activity params (cheap — a handful of
   // pods) so the header always shows who is working and who is stuck.
@@ -371,6 +384,57 @@ export default function App() {
             <span className="text-[11px] text-on-surface-variant">
               {hosts.length} HOSTS DISCOVERED
             </span>
+            <div className="h-4 w-px bg-outline-variant" />
+            <span
+              className={`material-symbols-outlined text-[16px] cursor-pointer ${
+                settings.meters
+                  ? "text-secondary"
+                  : "text-outline hover:text-on-surface-variant"
+              }`}
+              title={
+                settings.meters
+                  ? "Resource monitoring on — click to stop polling"
+                  : "Resource monitoring off"
+              }
+              onClick={() => setSetting("meters", !settings.meters)}
+            >
+              {settings.meters ? "monitor_heart" : "monitoring"}
+            </span>
+            {localStats && localStats.mem_total_mb > 0 && (
+              <>
+                <div className="h-4 w-px bg-outline-variant" />
+                <span
+                  className="flex items-center gap-2 text-[11px] text-on-surface-variant"
+                  title="This machine"
+                >
+                  <span>CPU</span>
+                  <span className="w-16 h-1.5 rounded-full bg-surface-container-highest overflow-hidden">
+                    <span
+                      className={`block h-full ${
+                        localStats.cpu > 85 ? "bg-error" : "bg-secondary"
+                      }`}
+                      style={{ width: `${Math.min(100, localStats.cpu)}%` }}
+                    />
+                  </span>
+                  <span className="font-mono">{localStats.cpu.toFixed(0)}%</span>
+                  <span className="ml-2">RAM</span>
+                  <span className="w-16 h-1.5 rounded-full bg-surface-container-highest overflow-hidden">
+                    <span
+                      className="block h-full bg-primary-container"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          (localStats.mem_used_mb / localStats.mem_total_mb) * 100,
+                        )}%`,
+                      }}
+                    />
+                  </span>
+                  <span className="font-mono">
+                    {(localStats.mem_used_mb / 1024).toFixed(1)}GB
+                  </span>
+                </span>
+              </>
+            )}
           </div>
           <div className="flex items-center gap-1.5 text-secondary">
             <span className="material-symbols-outlined text-[14px]">

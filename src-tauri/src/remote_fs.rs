@@ -295,6 +295,60 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 #[derive(Serialize, Clone)]
+pub struct HostStats {
+    pub cpu: f32,
+    pub mem_used_mb: u64,
+    pub mem_total_mb: u64,
+}
+
+/// CPU load and memory use for a pod's machine. One portable snippet covers
+/// macOS (top/vm_stat) and Linux (/proc), so the same call works for local
+/// and ssh pods.
+const STATS_SNIPPET: &str = r#"if [ "$(uname)" = "Darwin" ]; then
+C=$(top -l 2 -n 0 -s 0 2>/dev/null | awk '/^CPU usage/{u=$3;s=$5} END{gsub("%","",u);gsub("%","",s);print u+s}')
+T=$(( $(sysctl -n hw.memsize) / 1048576 ))
+F=$(vm_stat | awk '/Pages free|Pages inactive|Pages speculative/{gsub("\.","",$NF); s+=$NF} END{print int(s*4096/1048576)}')
+echo "$C $((T-F)) $T"
+else
+read _ a b c d e f g rest < /proc/stat; i1=$((d+e)); t1=$((a+b+c+d+e+f+g))
+sleep 0.25
+read _ a b c d e f g rest < /proc/stat; i2=$((d+e)); t2=$((a+b+c+d+e+f+g))
+C=$(awk -v i1=$i1 -v t1=$t1 -v i2=$i2 -v t2=$t2 'BEGIN{d=t2-t1; if(d<=0){print 0}else{printf "%.1f", 100*(1-(i2-i1)/d)}}')
+MT=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
+MA=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+echo "$C $((MT-MA)) $MT"
+fi"#;
+
+#[tauri::command]
+pub fn host_stats(host: Option<String>) -> Result<HostStats, String> {
+    let out = match host {
+        None => Command::new("sh")
+            .arg("-c")
+            .arg(STATS_SNIPPET)
+            .output()
+            .map_err(|e| e.to_string())?,
+        Some(h) => ssh_base(&h)
+            .arg(STATS_SNIPPET)
+            .output()
+            .map_err(|e| e.to_string())?,
+    };
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).to_string());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().last().unwrap_or("").trim();
+    let mut it = line.split_whitespace();
+    let cpu: f32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let used: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let total: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    Ok(HostStats {
+        cpu: cpu.clamp(0.0, 100.0),
+        mem_used_mb: used,
+        mem_total_mb: total,
+    })
+}
+
+#[derive(Serialize, Clone)]
 pub struct PathInfo {
     pub exists: bool,
     pub is_dir: bool,

@@ -12,6 +12,7 @@ import {
 import {
   fsHomeDir,
   fsStat,
+  tmuxSessionStarted,
   onPtyExit,
   onPtyOutput,
   ptyKill,
@@ -19,6 +20,8 @@ import {
   ptySpawn,
   ptyWrite,
 } from "../ipc";
+import { HostStats, subscribeHostStats } from "../hostStats";
+import { useSettings } from "../settings";
 import { Explorer } from "./Explorer";
 import { EditorPanel } from "./EditorPanel";
 
@@ -115,6 +118,32 @@ const TERM_THEME = {
  * header drags the pod, with dockview's translucent drop preview showing
  * where it will land (top/bottom/left/right split or stack).
  */
+/** Thin CPU/RAM bars for the pod's machine. */
+function Meters({ stats }: { stats: HostStats | null }) {
+  if (!stats || !stats.mem_total_mb) return null;
+  const memPct = (stats.mem_used_mb / stats.mem_total_mb) * 100;
+  const bar = (pct: number, tone: string) => (
+    <span className="w-6 h-1 rounded-full bg-surface-container-highest overflow-hidden">
+      <span
+        className={`block h-full ${tone}`}
+        style={{ width: `${Math.min(100, Math.max(2, pct))}%` }}
+      />
+    </span>
+  );
+  const gb = (mb: number) => (mb / 1024).toFixed(1);
+  return (
+    <span
+      className="hidden sm:flex items-center gap-1.5 text-[10px] text-outline"
+      title={`CPU ${stats.cpu.toFixed(0)}% · RAM ${gb(stats.mem_used_mb)}/${gb(
+        stats.mem_total_mb,
+      )} GB`}
+    >
+      {bar(stats.cpu, stats.cpu > 85 ? "bg-error" : "bg-secondary")}
+      {bar(memPct, memPct > 90 ? "bg-error" : "bg-primary-container")}
+    </span>
+  );
+}
+
 export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
   const {
     label,
@@ -125,7 +154,17 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
     editorOpen,
   } = props.params;
   const [maximized, setMaximized] = useState(false);
+  const [stats, setStats] = useState<HostStats | null>(null);
   const [, tick] = useState(0);
+
+  const settings = useSettings();
+  useEffect(() => {
+    if (!settings.meters) {
+      setStats(null);
+      return;
+    }
+    return subscribeHostStats(props.params.host, setStats);
+  }, [props.params.host, settings.meters]);
 
   useEffect(() => {
     const t = setInterval(() => tick((n) => n + 1), 30_000);
@@ -173,6 +212,7 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
             NEEDS INPUT
           </span>
         )}
+        {status === "running" && <Meters stats={stats} />}
         <span className="font-mono text-on-surface-variant text-[11px]">
           {status === "exited"
             ? "ENDED"
@@ -319,10 +359,20 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
         const session = `omniagent-${podId}`;
         await ptySpawn(podId, host, session, term.rows, term.cols);
         if (!disposed) {
-          props.api.updateParameters({
-            status: "running",
-            startedAt: Date.now(),
-          });
+          props.api.updateParameters({ status: "running" });
+          // Uptime counts the tmux session's life, which survives app
+          // restarts — not when this pod happened to be opened.
+          tmuxSessionStarted(host, session)
+            .then((epoch) => {
+              if (!disposed) {
+                props.api.updateParameters({
+                  startedAt: epoch ? epoch * 1000 : Date.now(),
+                });
+              }
+            })
+            .catch(() => {
+              if (!disposed) props.api.updateParameters({ startedAt: Date.now() });
+            });
         }
       } catch (e) {
         term.writeln(`\x1b[31m[OmniAgent] spawn failed: ${e}\x1b[0m`);
@@ -504,6 +554,8 @@ function formatUptime(ms: number): string {
   const mins = Math.floor(ms / 60_000);
   const h = Math.floor(mins / 60);
   const m = mins % 60;
+  // Sessions live for days, so keep the label short once past 24h.
+  if (h >= 24) return `${Math.floor(h / 24)}d ${h % 24}h`;
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 

@@ -13,6 +13,7 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            pty::tmux_session_started,
             remote_fs::fs_list_dir,
             remote_fs::fs_read_file,
             remote_fs::fs_write_file,
@@ -23,6 +24,7 @@ pub fn run() {
             remote_fs::fs_download,
             remote_fs::fs_stat,
             remote_fs::fs_read_base64,
+            remote_fs::host_stats,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

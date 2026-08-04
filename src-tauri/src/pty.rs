@@ -248,6 +248,37 @@ pub fn pty_resize(
         .map_err(|e| e.to_string())
 }
 
+/// When the pod's tmux session was created (epoch seconds). That, not the
+/// moment the pod was opened, is how long the work has been running — the
+/// session outlives app restarts.
+#[tauri::command]
+pub fn tmux_session_started(host: Option<String>, session: String) -> Option<i64> {
+    let query = format!(
+        "tmux display -p -t '{}' '#{{session_created}}' 2>/dev/null",
+        session.replace('\'', "")
+    );
+    let out = match host {
+        None => std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&query)
+            .env(
+                "PATH",
+                format!(
+                    "{}:/opt/homebrew/bin:/usr/local/bin",
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output()
+            .ok()?,
+        Some(h) => std::process::Command::new("ssh")
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
+            .arg(&query)
+            .output()
+            .ok()?,
+    };
+    String::from_utf8_lossy(&out.stdout).trim().parse::<i64>().ok()
+}
+
 /// Kill every pty client process. Called on app exit BEFORE state is dropped:
 /// the master writer's Drop sends `\n`+EOF into the pty, and a still-attached
 /// tmux client would forward that into its session and terminate the shell —

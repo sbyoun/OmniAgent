@@ -31,6 +31,10 @@ export const ptyResize = (id: string, rows: number, cols: number) =>
 
 export const ptyKill = (id: string) => invoke<void>("pty_kill", { id });
 
+/** Epoch seconds when the pod's tmux session was created, if it has one. */
+export const tmuxSessionStarted = (host: string | null, session: string) =>
+  invoke<number | null>("tmux_session_started", { host, session });
+
 export const fsListDir = (host: string | null, path: string) =>
   invoke<DirEntry[]>("fs_list_dir", { host, path });
 
