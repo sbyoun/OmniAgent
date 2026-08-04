@@ -53,14 +53,33 @@ needs-input notifications, and fleet-wide agent instructions are the
 - **Session lifecycle that makes sense** — `exit` ends the session and closes
   the pod; closing a pod kills its backing session; quitting the app preserves
   everything for next launch.
-- **Native & lightweight** — Tauri 2 (Rust backend), not Electron.
+- **Input that actually works** — the terminal runs on Chromium, deliberately.
+  WKWebView drops composed CJK syllables through a race nobody can reproduce on
+  demand; [WEBKIT-IME.md](WEBKIT-IME.md) has the measurements.
+
+## Two builds
+
+The project ships on two runtimes, and you pick per machine:
+
+| | Branch | Tags | Runtime |
+|---|---|---|---|
+| **Electron** | `electron` | `v0.4.x` | Chromium |
+| **Tauri** | `main` | `v0.3.x` | WKWebView (macOS), WebView2, WebKitGTK |
+
+The Tauri build is a tenth of the size and lighter on memory. The Electron
+build is larger, but on macOS its terminal takes Korean, Japanese and Chinese
+input reliably — WKWebView drops composed syllables through a timing race that
+varies by machine and by launch, which the Tauri build works around with a
+bridge that cannot cover every case. [WEBKIT-IME.md](WEBKIT-IME.md) has the
+measurements. If you type CJK in the terminal on macOS, take the Electron
+build; otherwise either is fine.
 
 ## Stack
 
 | Layer | Tech |
 |---|---|
-| Shell | Tauri 2 (Rust) |
-| PTY | portable-pty + tmux |
+| Shell | Electron |
+| PTY | node-pty + tmux |
 | UI | React 19 + TypeScript + Tailwind CSS 4 |
 | Layout | dockview-react |
 | Terminal | @xterm/xterm |
@@ -68,15 +87,16 @@ needs-input notifications, and fleet-wide agent instructions are the
 
 ## Getting started
 
-Requirements: [Rust](https://rustup.rs), Node.js 18+, and `tmux`
-(optional, needed for local session restore; `brew install tmux`).
+Requirements: Node.js 20+, and `tmux` (optional, needed for local session
+restore; `brew install tmux`).
 
 ```bash
 git clone https://github.com/sbyoun/OmniAgent.git
 cd OmniAgent
 npm install
-npm run tauri dev    # development
-npm run tauri build  # production bundle
+npm run dev          # Vite, in one terminal
+npm run dev:electron # the app, in another
+npm run package      # signed, notarized bundle
 ```
 
 On first launch the sidebar lists every concrete `Host` from your

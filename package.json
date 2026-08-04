@@ -7,7 +7,6 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
     "dev:electron": "npm run build:main && cross-env VITE_DEV_SERVER_URL=http://localhost:1420 electron .",
     "build:main": "node scripts/build-electron.mjs",
     "build:app": "vite build && npm run build:main",
@@ -16,8 +15,6 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2",
     "@xterm/addon-clipboard": "^0.2.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
@@ -29,8 +26,8 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@electron/notarize": "^3.1.1",
     "@tailwindcss/vite": "^4.3.3",
-    "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
@@ -76,6 +73,26 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "afterSign": "build/notarize.cjs",
+    "publish": {
+      "provider": "github",
+      "owner": "sbyoun",
+      "repo": "OmniAgent",
+      "releaseType": "draft"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development"
     }
   }
 }
