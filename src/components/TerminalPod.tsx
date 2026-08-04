@@ -3,13 +3,15 @@ import {
   IDockviewPanelProps,
 } from "dockview-react";
 import { useEffect, useRef, useState } from "react";
-import { Terminal } from "@xterm/xterm";
+import { ILink, Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import {
   BrowserClipboardProvider,
   ClipboardAddon,
 } from "@xterm/addon-clipboard";
 import {
+  fsHomeDir,
+  fsStat,
   onPtyExit,
   onPtyOutput,
   ptyKill,
@@ -67,6 +69,28 @@ export interface PodParams {
   startedAt?: number;
   explorerOpen?: boolean;
   editorOpen?: boolean;
+  /** Directory the explorer is browsing — restored with the layout. */
+  explorerPath?: string;
+  /** File open in the editor — restored with the layout. */
+  editorPath?: string;
+}
+
+
+/**
+ * Path-ish tokens in terminal output: absolute (/etc/hosts, ~/src), explicitly
+ * relative (./x, ../x), nested relative (src/app.ts) and bare filenames with a
+ * known extension. Trailing punctuation and :line:col suffixes are trimmed by
+ * the caller.
+ */
+const PATH_RE =
+  /(?:~|\.{1,2})?\/[\w.\-/@+]+|\b[\w.\-]+\/[\w.\-/@+]+|\b[\w.\-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|toml|ya?ml|md|txt|log|css|scss|html|py|rs|go|java|kt|swift|c|h|cpp|hpp|sh|zsh|sql|env|lock)\b/g;
+
+/** Strip decoration the shell or an agent tends to put around a path. */
+function cleanPath(raw: string): string {
+  let p = raw.replace(/^[('"`\[]+/, "").replace(/[)'"`\],.;:]+$/, "");
+  // file.ts:12:3 / file.ts:12 → file.ts
+  p = p.replace(/:(\d+)(:\d+)?$/, "");
+  return p;
 }
 
 const TERM_THEME = {
@@ -209,7 +233,15 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
   const { host, explorerOpen, editorOpen } = props.params;
   const podId = props.api.id;
   const containerRef = useRef<HTMLDivElement>(null);
-  const [editorPath, setEditorPath] = useState<string | null>(null);
+  const editorPath = props.params.editorPath ?? null;
+  const setEditorPath = (path: string | null) =>
+    props.api.updateParameters({ editorPath: path ?? undefined });
+  const [explorerGoto, setExplorerGoto] = useState<{
+    path: string;
+    nonce: number;
+  } | null>(null);
+  const explorerCwdRef = useRef<string | null>(null);
+  const homeRef = useRef<string | null>(null);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -335,6 +367,69 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     };
     const dataSub = term.onData(write);
 
+    // ⌘/Ctrl-click a path in the output: directories open the explorer,
+    // files open in the editor. Paths are only decorated while the modifier
+    // is held, so normal output stays clean.
+    let modifierHeld = false;
+    const onModKey = (e: KeyboardEvent) => {
+      modifierHeld = e.metaKey || e.ctrlKey;
+    };
+    window.addEventListener("keydown", onModKey);
+    window.addEventListener("keyup", onModKey);
+
+    const resolvePath = async (raw: string): Promise<string | null> => {
+      const p = cleanPath(raw);
+      if (!p) return null;
+      if (p.startsWith("/")) return p;
+      if (p.startsWith("~")) {
+        if (!homeRef.current) homeRef.current = await fsHomeDir(host);
+        return p.replace(/^~/, homeRef.current);
+      }
+      // Relative paths resolve against the directory the explorer is showing;
+      // with no explorer open there is nothing to resolve against.
+      const base = explorerCwdRef.current;
+      if (!base) return null;
+      return `${base.replace(/\/$/, "")}/${p.replace(/^\.\//, "")}`;
+    };
+
+    const linkSub = term.registerLinkProvider({
+      provideLinks(lineNumber, callback) {
+        if (!modifierHeld) return callback(undefined);
+        const line = term.buffer.active.getLine(lineNumber - 1);
+        const text = line?.translateToString(true) ?? "";
+        const links: ILink[] = [];
+        for (const m of text.matchAll(PATH_RE)) {
+          const raw = m[0];
+          const start = m.index ?? 0;
+          links.push({
+            range: {
+              start: { x: start + 1, y: lineNumber },
+              end: { x: start + raw.length, y: lineNumber },
+            },
+            text: raw,
+            activate: async () => {
+              const full = await resolvePath(raw);
+              if (!full) return;
+              try {
+                const info = await fsStat(host, full);
+                if (!info.exists) return;
+                if (info.is_dir) {
+                  props.api.updateParameters({ explorerOpen: true });
+                  setExplorerGoto({ path: full, nonce: Date.now() });
+                } else {
+                  setEditorPath(full);
+                  props.api.updateParameters({ editorOpen: true });
+                }
+              } catch {
+                /* unreachable path — leave the terminal alone */
+              }
+            },
+          });
+        }
+        callback(links.length ? links : undefined);
+      },
+    });
+
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
     const observer = new ResizeObserver(() => {
       clearTimeout(resizeTimer);
@@ -353,6 +448,9 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
 
     return () => {
       disposed = true;
+      window.removeEventListener("keydown", onModKey);
+      window.removeEventListener("keyup", onModKey);
+      linkSub.dispose();
       clearTimeout(idleTimer);
       clearTimeout(resizeTimer);
       observer.disconnect();
@@ -376,6 +474,13 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
               setEditorPath(path);
               props.api.updateParameters({ editorOpen: true });
             }}
+            initialPath={props.params.explorerPath}
+            onCwdChange={(cwd) => {
+              explorerCwdRef.current = cwd;
+              if (cwd !== props.params.explorerPath)
+                props.api.updateParameters({ explorerPath: cwd });
+            }}
+            gotoPath={explorerGoto}
           />
         )}
         <div className="flex flex-col flex-1 min-w-0 min-h-0">

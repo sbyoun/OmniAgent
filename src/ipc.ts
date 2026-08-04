@@ -49,6 +49,18 @@ export const fsMkdir = (host: string | null, path: string) =>
 export const fsCreateFile = (host: string | null, path: string) =>
   invoke<void>("fs_create_file", { host, path });
 
+export interface PathInfo {
+  exists: boolean;
+  is_dir: boolean;
+}
+
+/** Reads a file as base64 — used by the image viewer (works for ssh pods). */
+export const fsReadBase64 = (host: string | null, path: string) =>
+  invoke<string>("fs_read_base64", { host, path });
+
+export const fsStat = (host: string | null, path: string) =>
+  invoke<PathInfo>("fs_stat", { host, path });
+
 /** Copies the file into ~/Downloads and resolves with the saved path. */
 export const fsDownload = (host: string | null, path: string) =>
   invoke<string>("fs_download", { host, path });

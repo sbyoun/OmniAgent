@@ -21,6 +21,8 @@ pub fn run() {
             remote_fs::fs_create_file,
             remote_fs::fs_upload,
             remote_fs::fs_download,
+            remote_fs::fs_stat,
+            remote_fs::fs_read_base64,
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

@@ -256,6 +256,80 @@ pub fn fs_download(host: Option<String>, path: String) -> Result<String, String>
     Ok(target.to_string_lossy().to_string())
 }
 
+/// Read a file as base64 — used by the image viewer, which needs raw bytes
+/// (and must work for remote pods, where the file lives over ssh).
+#[tauri::command]
+pub fn fs_read_base64(host: Option<String>, path: String) -> Result<String, String> {
+    let bytes: Vec<u8> = match host {
+        None => std::fs::read(&path).map_err(|e| e.to_string())?,
+        Some(h) => {
+            let output = ssh_base(&h)
+                .arg(format!("cat {}", shell_quote(&path)))
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !output.status.success() {
+                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+            output.stdout
+        }
+    };
+    const MAX: usize = 25 * 1024 * 1024;
+    if bytes.len() > MAX {
+        return Err(format!("file too large to preview ({} MB)", bytes.len() / 1_048_576));
+    }
+    Ok(base64_encode(&bytes))
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(T[(n >> 18 & 63) as usize] as char);
+        out.push(T[(n >> 12 & 63) as usize] as char);
+        out.push(if c.len() > 1 { T[(n >> 6 & 63) as usize] as char } else { '=' });
+        out.push(if c.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+#[derive(Serialize, Clone)]
+pub struct PathInfo {
+    pub exists: bool,
+    pub is_dir: bool,
+}
+
+/// Does this path exist, and is it a directory? Used to decide whether a
+/// path clicked in the terminal opens in the explorer or the editor.
+#[tauri::command]
+pub fn fs_stat(host: Option<String>, path: String) -> Result<PathInfo, String> {
+    match host {
+        None => match std::fs::metadata(&path) {
+            Ok(m) => Ok(PathInfo {
+                exists: true,
+                is_dir: m.is_dir(),
+            }),
+            Err(_) => Ok(PathInfo {
+                exists: false,
+                is_dir: false,
+            }),
+        },
+        Some(h) => {
+            let q = shell_quote(&path);
+            let output = ssh_base(&h)
+                .arg(format!("if [ -d {q} ]; then echo dir; elif [ -e {q} ]; then echo file; else echo none; fi"))
+                .output()
+                .map_err(|e| e.to_string())?;
+            let kind = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok(PathInfo {
+                exists: kind != "none",
+                is_dir: kind == "dir",
+            })
+        }
+    }
+}
+
 /// Default working directory for a pod's explorer: $HOME locally, `~` resolved
 /// remotely.
 #[tauri::command]

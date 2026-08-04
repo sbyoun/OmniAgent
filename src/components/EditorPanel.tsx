@@ -2,7 +2,7 @@ import Editor, { OnMount } from "@monaco-editor/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import { fsDownload, fsReadFile, fsWriteFile } from "../ipc";
+import { fsDownload, fsReadBase64, fsReadFile, fsWriteFile } from "../ipc";
 
 interface Props {
   host: string | null;
@@ -18,18 +18,29 @@ export function EditorPanel({ host, path, onClose }: Props) {
   const [saveState, setSaveState] = useState<SaveState>("clean");
   const [preview, setPreview] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const valueRef = useRef("");
   const saveRef = useRef<() => void>(() => {});
   const previewRef = useRef<HTMLDivElement>(null);
 
   const isMarkdown = !!path && /\.(md|markdown|mdx)$/i.test(path);
+  const imageType = path ? imageMime(path) : null;
 
   useEffect(() => {
     if (!path) return;
     setContent(null);
+    setImageSrc(null);
     setError(null);
     setSaveState("clean");
+    const mime = imageMime(path);
+    if (mime) {
+      // Images are fetched as base64 and shown inline instead of as text.
+      fsReadBase64(host, path)
+        .then((b64) => setImageSrc(`data:${mime};base64,${b64}`))
+        .catch((e) => setError(String(e)));
+      return;
+    }
     // Markdown opens in preview; code opens in the editor.
     setPreview(/\.(md|markdown|mdx)$/i.test(path));
     fsReadFile(host, path)
@@ -127,7 +138,7 @@ export function EditorPanel({ host, path, onClose }: Props) {
               saved to {saved}
             </span>
           )}
-          {path && isMarkdown && (
+          {path && isMarkdown && !imageType && (
             <span
               className={`material-symbols-outlined text-[14px] cursor-pointer ${
                 preview
@@ -140,7 +151,7 @@ export function EditorPanel({ host, path, onClose }: Props) {
               {preview ? "code" : "visibility"}
             </span>
           )}
-          {path && (
+          {path && !imageType && (
             <span
               className={`material-symbols-outlined text-[14px] cursor-pointer ${
                 copied
@@ -162,7 +173,7 @@ export function EditorPanel({ host, path, onClose }: Props) {
               download
             </span>
           )}
-          {path && !preview && (
+          {path && !preview && !imageType && (
             <span
               className="material-symbols-outlined text-[14px] text-on-surface-variant hover:text-on-surface cursor-pointer"
               title="Save (⌘S)"
@@ -189,6 +200,18 @@ export function EditorPanel({ host, path, onClose }: Props) {
           <div className="p-3 text-error text-[11px] font-mono whitespace-pre-wrap select-text">
             {error}
           </div>
+        ) : imageType ? (
+          imageSrc ? (
+            <div className="h-full overflow-auto bg-surface-container-lowest flex items-center justify-center p-3">
+              <img
+                src={imageSrc}
+                alt={path ?? ""}
+                className="max-w-full max-h-full object-contain"
+              />
+            </div>
+          ) : (
+            <div className="p-3 text-outline text-[11px] font-mono">loading…</div>
+          )
         ) : content === null ? (
           <div className="p-3 text-outline text-[11px] font-mono">loading…</div>
         ) : preview ? (
@@ -220,6 +243,23 @@ export function EditorPanel({ host, path, onClose }: Props) {
       </div>
     </div>
   );
+}
+
+/** MIME type for previewable images, or null for everything else. */
+function imageMime(path: string): string | null {
+  const ext = path.split(".").pop()?.toLowerCase() ?? "";
+  const map: Record<string, string> = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    gif: "image/gif",
+    webp: "image/webp",
+    bmp: "image/bmp",
+    svg: "image/svg+xml",
+    ico: "image/x-icon",
+    avif: "image/avif",
+  };
+  return map[ext] ?? null;
 }
 
 function guessLanguage(path: string): string {

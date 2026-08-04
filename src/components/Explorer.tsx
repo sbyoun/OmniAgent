@@ -12,9 +12,21 @@ import {
 interface Props {
   host: string | null;
   onOpenFile: (path: string) => void;
+  /** Reported whenever the browsed directory changes (for path resolution). */
+  onCwdChange?: (cwd: string) => void;
+  /** Navigate here when this changes — used by ⌘-click on a terminal path. */
+  gotoPath?: { path: string; nonce: number } | null;
+  /** Directory to open on mount (restored from the saved layout). */
+  initialPath?: string;
 }
 
-export function Explorer({ host, onOpenFile }: Props) {
+export function Explorer({
+  host,
+  onOpenFile,
+  onCwdChange,
+  gotoPath,
+  initialPath,
+}: Props) {
   const [cwd, setCwd] = useState<string | null>(null);
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -34,6 +46,7 @@ export function Explorer({ host, onOpenFile }: Props) {
       try {
         const list = await fsListDir(host, path);
         setCwd(path);
+        onCwdChange?.(path);
         setEntries(list);
       } catch (e) {
         setError(String(e));
@@ -46,6 +59,11 @@ export function Explorer({ host, onOpenFile }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    // Reopen where we left off; fall back to the home directory.
+    if (initialPath) {
+      load(initialPath).catch(() => fsHomeDir(host).then(load));
+      return;
+    }
     fsHomeDir(host)
       .then((home) => {
         if (!cancelled) load(home);
@@ -54,11 +72,18 @@ export function Explorer({ host, onOpenFile }: Props) {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host, load]);
 
   useEffect(() => {
     if (creating) inputRef.current?.focus();
   }, [creating]);
+
+  // External navigation request (⌘-click on a path in the terminal).
+  useEffect(() => {
+    if (gotoPath) load(gotoPath.path);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gotoPath?.nonce]);
 
   const up = () => {
     if (!cwd || cwd === "/") return;
