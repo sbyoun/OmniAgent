@@ -216,7 +216,7 @@
       };
 
       document.getElementById("back").onclick = () => {
-        location.href = "/";
+        location.href = new URL("index.html", location.href).href;
       };
 
       document.getElementById("env").textContent =

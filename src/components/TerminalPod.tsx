@@ -22,7 +22,6 @@ import {
 } from "../ipc";
 import { HostStats, subscribeHostStats } from "../hostStats";
 import { useSettings } from "../settings";
-import { setupImeInput } from "../ime";
 import { Explorer } from "./Explorer";
 import { EditorPanel } from "./EditorPanel";
 
@@ -95,6 +94,11 @@ function cleanPath(raw: string): string {
   // file.ts:12:3 / file.ts:12 → file.ts
   p = p.replace(/:(\d+)(:\d+)?$/, "");
   return p;
+}
+
+/** The bits of xterm's internals the pod reaches into. */
+interface PodCore {
+  _selectionService?: { shouldForceSelection: (e: MouseEvent) => boolean };
 }
 
 const TERM_THEME = {
@@ -315,6 +319,17 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     const fontLoaded = document.fonts.check('13px "JetBrains Mono"');
     term.open(el);
 
+    // tmux has to own the mouse for the wheel to scroll its scrollback, but
+    // that also hands it drag-selection — and tmux copies and clears the
+    // highlight the instant the drag ends, so a selection can never be looked
+    // at, adjusted, or extended. Take left-button drags back for the browser:
+    // xterm skips reporting them and selects natively instead (the selection
+    // stays until you click away, ⌘C copies it), while the wheel and every
+    // other button still report to tmux.
+    const selection = (term as unknown as { _core?: PodCore })._core
+      ?._selectionService;
+    if (selection) selection.shouldForceSelection = (e) => e.button === 0;
+
     let disposed = false;
     if (!fontLoaded) {
       document.fonts.ready.then(() => {
@@ -436,13 +451,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       );
     };
 
-    const ime = setupImeInput(term, write);
-    const dataSub = term.onData((data) => {
-      // The bridge owns composed text; everything else — ASCII, control
-      // keys, mouse reports — is xterm's and passes straight through.
-      const out = ime.route(data);
-      if (out) write(out);
-    });
+    const dataSub = term.onData(write);
 
     // ⌘/Ctrl-click a path in the output: directories open the explorer,
     // files open in the editor. Paths are only decorated while the modifier
@@ -532,7 +541,6 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       clearTimeout(resizeTimer);
       observer.disconnect();
       dataSub.dispose();
-      ime.dispose();
       focusDispose.dispose();
       unlisteners.forEach((u) => u());
       ptyKill(podId).catch(() => {});

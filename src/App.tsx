@@ -5,7 +5,6 @@ import {
   themeDark,
 } from "dockview-react";
 import { useEffect, useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listSshHosts, SshHost } from "./ipc";
 import { HostStats, subscribeHostStats } from "./hostStats";
 import { setSetting, useSettings } from "./settings";
@@ -51,7 +50,7 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey && e.shiftKey && e.code === "KeyI") {
         e.preventDefault();
-        location.href = "/ime-check.html";
+        location.href = new URL("ime-check.html", location.href).href;
       }
     };
     window.addEventListener("keydown", onKey);
@@ -209,15 +208,12 @@ export default function App() {
   return (
     <div className="flex flex-col h-screen w-screen bg-surface text-on-surface">
       {/* Custom title bar strip — native traffic lights overlay this area
-          (titleBarStyle: Overlay), so it doubles as the window drag region. */}
+          (titleBarStyle: hiddenInset), so it doubles as the window drag region.
+          The platform handles dragging and double-click-to-zoom from the
+          app-region style; children that take clicks opt out with `no-drag`. */}
       <div
         className="h-9 shrink-0 bg-surface-container-lowest border-b border-surface-container-highest flex items-center justify-center relative"
-        onMouseDown={(e) => {
-          if (e.button !== 0) return;
-          const win = getCurrentWindow();
-          if (e.detail === 2) win.toggleMaximize();
-          else win.startDragging();
-        }}
+        style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
       >
         <div className="flex items-center gap-2 pointer-events-none">
           <div className="w-5 h-5 bg-primary rounded flex items-center justify-center">
