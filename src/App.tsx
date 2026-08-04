@@ -43,6 +43,21 @@ export default function App() {
     listSshHosts().then(setHosts).catch(console.error);
   }, []);
 
+  // ⌘⇧I opens the IME diagnostic page. Korean input depends on whether this
+  // webview reports composition events at all, which varies by machine — the
+  // page answers that in one screen, and the same file opened in Safari says
+  // whether the difference is WebKit's or the app's.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey && e.shiftKey && e.code === "KeyI") {
+        e.preventDefault();
+        location.href = "/ime-check.html";
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // This machine's load, shown in the footer.
   const [localStats, setLocalStats] = useState<HostStats | null>(null);
   const settings = useSettings();

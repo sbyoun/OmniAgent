@@ -29,3 +29,4 @@ docs/
 *.njsproj
 *.sln
 *.sw?
+dist-test

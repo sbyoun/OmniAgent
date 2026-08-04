@@ -22,6 +22,7 @@ import {
 } from "../ipc";
 import { HostStats, subscribeHostStats } from "../hostStats";
 import { useSettings } from "../settings";
+import { setupImeInput } from "../ime";
 import { Explorer } from "./Explorer";
 import { EditorPanel } from "./EditorPanel";
 
@@ -294,6 +295,11 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       cursorBlink: true,
       theme: TERM_THEME,
       scrollback: 5000,
+      // tmux owns the mouse (so the wheel scrolls its scrollback), and it
+      // copies and clears the highlight the moment the drag ends. Holding
+      // Option takes the drag back for the browser: the selection stays put
+      // like in any other text view, and ⌘C copies it.
+      macOptionClickForcesSelection: true,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -302,9 +308,23 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     term.loadAddon(
       new ClipboardAddon(undefined, new TmuxFriendlyClipboardProvider()),
     );
+    // xterm measures the cell grid the moment it opens, and the terminal
+    // font is fetched over the network — so a pod that opens first is sized
+    // against the fallback font and never re-measured, leaving the rendered
+    // text and the mouse-to-cell mapping on slightly different grids.
+    const fontLoaded = document.fonts.check('13px "JetBrains Mono"');
     term.open(el);
 
     let disposed = false;
+    if (!fontLoaded) {
+      document.fonts.ready.then(() => {
+        if (disposed) return;
+        // Round-trip the family so xterm re-measures with the real font.
+        term.options.fontFamily = "monospace";
+        term.options.fontFamily = "JetBrains Mono, monospace";
+        fit.fit();
+      });
+    }
     const unlisteners: Array<() => void> = [];
 
     const spawnedAt = Date.now();
@@ -415,7 +435,14 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
         ptyWrite(podId, data).catch(() => {}),
       );
     };
-    const dataSub = term.onData(write);
+
+    const ime = setupImeInput(term, write);
+    const dataSub = term.onData((data) => {
+      // The bridge owns composed text; everything else — ASCII, control
+      // keys, mouse reports — is xterm's and passes straight through.
+      const out = ime.route(data);
+      if (out) write(out);
+    });
 
     // ⌘/Ctrl-click a path in the output: directories open the explorer,
     // files open in the editor. Paths are only decorated while the modifier
@@ -505,6 +532,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       clearTimeout(resizeTimer);
       observer.disconnect();
       dataSub.dispose();
+      ime.dispose();
       focusDispose.dispose();
       unlisteners.forEach((u) => u());
       ptyKill(podId).catch(() => {});

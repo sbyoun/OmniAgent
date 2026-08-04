@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>IME 진단 — OmniAgent</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 24px;
+        background: #0e0e0e;
+        color: #e5e2e1;
+      }
+      h1 {
+        font-size: 15px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #8a919a;
+        margin: 0 0 4px;
+      }
+      p {
+        font-size: 13px;
+        color: #8a919a;
+        margin: 0 0 16px;
+        line-height: 1.6;
+      }
+      #box {
+        width: 100%;
+        box-sizing: border-box;
+        font-size: 18px;
+        padding: 12px 14px;
+        border-radius: 8px;
+        border: 1px solid #3a3a3a;
+        background: #171717;
+        color: #e5e2e1;
+      }
+      #box:focus {
+        outline: 2px solid #569cd6;
+        border-color: transparent;
+      }
+      .verdict {
+        margin: 16px 0;
+        padding: 12px 14px;
+        border-radius: 8px;
+        font-size: 14px;
+        line-height: 1.6;
+        background: #1c1c1c;
+        border-left: 3px solid #8a919a;
+      }
+      .verdict.ok {
+        border-left-color: #61dac1;
+      }
+      .verdict.bad {
+        border-left-color: #ffb4ab;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        margin: 12px 0;
+        flex-wrap: wrap;
+      }
+      button {
+        font: inherit;
+        font-size: 13px;
+        padding: 7px 14px;
+        border-radius: 6px;
+        border: 1px solid #3a3a3a;
+        background: #1c1c1c;
+        color: #e5e2e1;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #262626;
+      }
+      #log {
+        font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+        font-size: 12px;
+        line-height: 1.7;
+        white-space: pre-wrap;
+        background: #131313;
+        border-radius: 8px;
+        padding: 12px 14px;
+        max-height: 46vh;
+        overflow: auto;
+        border: 1px solid #262626;
+      }
+      .c {
+        color: #61dac1;
+      }
+      .i {
+        color: #c9c999;
+      }
+      .k {
+        color: #8a919a;
+      }
+      #env {
+        font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+        font-size: 11px;
+        color: #8a919a;
+        margin-top: 14px;
+        word-break: break-all;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>IME 진단</h1>
+    <p>
+      아래 칸에 한글로 <strong>한글</strong>을 치세요. 이 페이지는 브라우저가
+      조합 이벤트(<code>compositionstart/update/end</code>)를 올려주는지만
+      봅니다. 같은 페이지를 <strong>사파리</strong>와
+      <strong>이 앱</strong>에서 열어 비교하면, 문제가 WebKit 자체인지 앱이
+      WebView를 붙이는 방식인지 갈립니다.
+    </p>
+
+    <input id="box" autocomplete="off" autocapitalize="off" spellcheck="false" />
+
+    <div id="verdict" class="verdict">아직 입력 없음 — 위 칸에 한글을 쳐보세요.</div>
+
+    <div class="row">
+      <button id="copy">로그 복사</button>
+      <button id="clear">지우기</button>
+      <button id="back">앱으로 돌아가기</button>
+    </div>
+
+    <div id="log"></div>
+    <div id="env"></div>
+
+    <script>
+      const box = document.getElementById("box");
+      const logEl = document.getElementById("log");
+      const verdictEl = document.getElementById("verdict");
+      const lines = [];
+      let sawComposition = false;
+      let sawReplacement = false;
+      const t0 = Date.now();
+
+      function add(cls, text) {
+        lines.push(text);
+        const div = document.createElement("div");
+        div.className = cls;
+        div.textContent = text;
+        logEl.appendChild(div);
+        logEl.scrollTop = logEl.scrollHeight;
+        verdict();
+      }
+
+      function verdict() {
+        if (sawComposition) {
+          verdictEl.className = "verdict ok";
+          verdictEl.textContent =
+            "조합 이벤트가 올라옵니다 — xterm.js의 기본 IME 경로가 동작하는 환경입니다. (브릿지는 스스로 꺼집니다)";
+        } else if (sawReplacement) {
+          verdictEl.className = "verdict bad";
+          verdictEl.textContent =
+            "조합 이벤트가 전혀 없습니다. 완성된 음절이 insertReplacementText 로만 옵니다 — xterm.js가 무시하는 신호이고, 브릿지가 메우는 구멍이 정확히 여기입니다.";
+        } else {
+          verdictEl.className = "verdict";
+          verdictEl.textContent =
+            "입력은 들어왔지만 아직 한글 조합이 없습니다 — 입력기를 한글로 바꾸고 쳐보세요.";
+        }
+      }
+
+      const ms = () => String(Date.now() - t0).padStart(5, " ");
+      const q = (s) => JSON.stringify(s ?? null);
+
+      for (const type of ["compositionstart", "compositionupdate", "compositionend"]) {
+        box.addEventListener(type, (e) => {
+          sawComposition = true;
+          add("c", `${ms()}  ${type.padEnd(18)} data=${q(e.data)} box=${q(box.value)}`);
+        });
+      }
+
+      box.addEventListener("input", (e) => {
+        if (e.inputType === "insertReplacementText") sawReplacement = true;
+        add(
+          "i",
+          `${ms()}  input              type=${(e.inputType || "?").padEnd(21)} data=${q(
+            e.data,
+          )} isComposing=${e.isComposing} box=${q(box.value)}`,
+        );
+      });
+
+      box.addEventListener("keydown", (e) => {
+        add(
+          "k",
+          `${ms()}  keydown            key=${q(e.key)} code=${e.keyCode} isComposing=${
+            e.isComposing
+          }`,
+        );
+      });
+
+      document.getElementById("clear").onclick = () => {
+        lines.length = 0;
+        logEl.textContent = "";
+        box.value = "";
+        sawComposition = false;
+        sawReplacement = false;
+        verdict();
+        box.focus();
+      };
+
+      document.getElementById("copy").onclick = async () => {
+        const env = document.getElementById("env").textContent;
+        try {
+          await navigator.clipboard.writeText(env + "\n\n" + lines.join("\n"));
+          document.getElementById("copy").textContent = "복사됨";
+          setTimeout(() => (document.getElementById("copy").textContent = "로그 복사"), 1500);
+        } catch {
+          document.getElementById("copy").textContent = "복사 실패";
+        }
+      };
+
+      document.getElementById("back").onclick = () => {
+        location.href = "/";
+      };
+
+      document.getElementById("env").textContent =
+        `host=${window.__TAURI_INTERNALS__ ? "OmniAgent (WKWebView)" : "browser"}  ` +
+        `ua=${navigator.userAgent}`;
+
+      box.focus();
+    </script>
+  </body>
+</html>

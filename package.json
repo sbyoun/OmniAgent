@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "test:ime": "esbuild src/ime.ts --bundle --format=esm --external:@xterm/xterm --outfile=dist-test/ime.mjs --log-level=error && node tests/ime.test.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
