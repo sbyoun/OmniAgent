@@ -63,6 +63,14 @@ pub fn pty_spawn(
         })
         .map_err(|e| e.to_string())?;
 
+    // GUI apps launched from Finder inherit no locale, and a tmux client
+    // without a UTF-8 LC_CTYPE treats the terminal as non-UTF-8 — dropping
+    // multibyte (e.g. Korean) input and rendering existing wide glyphs as
+    // underscores. Force a UTF-8 locale (keep the user's if already UTF-8).
+    let lang = std::env::var("LANG")
+        .ok()
+        .filter(|l| l.to_ascii_uppercase().contains("UTF"))
+        .unwrap_or_else(|| "en_US.UTF-8".into());
     let mut cmd = match &host {
         Some(h) => {
             // Each pod gets its OWN named session on the server — opening a
@@ -76,7 +84,13 @@ pub fn pty_spawn(
             // being translated into arrow keys (shell history).
             let remote_cmd = match &session {
                 Some(name) => format!(
-                    "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; new-session -A -s '{}' \\; set-option status off \\; set-option mouse on 2>/dev/null || exec $SHELL -l",
+                    // `-e` pins the locale on the SESSION. Without it the
+                    // shell inherits whatever environment the tmux *server*
+                    // was started with — and a server left over from a
+                    // non-UTF-8 launch breaks multibyte (Hangul) input while
+                    // the rest of the app looks fine.
+                    "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG en_US.UTF-8 \\; set-environment -g LC_CTYPE en_US.UTF-8 \\; new-session -A -s '{}' -e LANG=en_US.UTF-8 -e LC_CTYPE=en_US.UTF-8 \\; set-option status off \\; set-option mouse on 2>/dev/null || tmux -u new-session -A -s '{}' 2>/dev/null || exec $SHELL -l",
+                    name.replace('\'', ""),
                     name.replace('\'', "")
                 ),
                 None => "exec $SHELL -l".to_string(),
@@ -97,9 +111,10 @@ pub fn pty_spawn(
                         "-l",
                         "-c",
                         &format!(
-                            "command -v tmux >/dev/null 2>&1 && exec tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; new-session -A -s '{}' \\; set-option status off \\; set-option mouse on || exec \"{}\" -l",
+                            "command -v tmux >/dev/null 2>&1 && exec tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG {lang} \\; set-environment -g LC_CTYPE {lang} \\; new-session -A -s '{}' -e LANG={lang} -e LC_CTYPE={lang} \\; set-option status off \\; set-option mouse on || exec \"{}\" -l",
                             name.replace('\'', ""),
-                            shell
+                            shell,
+                            lang = &lang
                         ),
                     ]);
                 }
@@ -111,14 +126,6 @@ pub fn pty_spawn(
         }
     };
     cmd.env("TERM", "xterm-256color");
-    // GUI apps launched from Finder inherit no locale, and a tmux client
-    // without a UTF-8 LC_CTYPE treats the terminal as non-UTF-8 — dropping
-    // multibyte (e.g. Korean) input and rendering existing wide glyphs as
-    // underscores. Force a UTF-8 locale (keep the user's if already UTF-8).
-    let lang = std::env::var("LANG")
-        .ok()
-        .filter(|l| l.to_ascii_uppercase().contains("UTF"))
-        .unwrap_or_else(|| "en_US.UTF-8".into());
     cmd.env("LANG", &lang);
     cmd.env("LC_CTYPE", &lang);
     if let Some(home) = dirs::home_dir() {
