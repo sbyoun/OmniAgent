@@ -37,6 +37,10 @@ const composedOnly = (s: string) =>
  * through the textarea. The caller passes every xterm emission through
  * `route()`, which drops the jamo and orders a held syllable ahead of
  * whatever comes next.
+ *
+ * Held text is drawn at the cursor while it waits — see `paint` — because
+ * nothing else will: it has not reached the pty, so the shell cannot echo it,
+ * and xterm's composition view never activates without composition events.
  */
 export function setupImeInput(term: Terminal, send: (data: string) => void) {
   const ta = term.textarea;
@@ -49,6 +53,49 @@ export function setupImeInput(term: Terminal, send: (data: string) => void) {
   /** Text xterm emitted a moment ago, to recognize a paste it already sent. */
   let justRouted = "";
   let justRoutedAt = 0;
+  /** Held back, not yet sent — kept for when the box is cleared under us. */
+  let held = "";
+
+  /**
+   * The held character, drawn where the cursor is.
+   *
+   * It has not reached the pty, so nothing echoes it back, and xterm's own
+   * `.composition-view` would show it but only lights up on composition
+   * events — the very events this webview never sends. Without this the
+   * syllable being typed is invisible until something finalizes it.
+   *
+   * xterm parks the textarea on the cursor cell so the IME's candidate window
+   * lands in the right place; borrowing its box puts the view exactly there,
+   * with no second measurement of the cell grid to drift out of step.
+   */
+  const helpers = ta.parentElement;
+  const view = helpers ? ta.ownerDocument.createElement("div") : null;
+  if (view && helpers) {
+    view.className = "composition-view"; // xterm's own placement rules
+    view.style.pointerEvents = "none";
+    view.style.textDecoration = "underline";
+    helpers.appendChild(view);
+  }
+
+  const paint = () => {
+    held = native ? "" : ta.value.slice(sent.length);
+    if (!view) return;
+    // Before xterm has parked the textarea there is no cursor cell to sit on.
+    if (!held || !ta.style.left) {
+      view.classList.remove("active");
+      return;
+    }
+    view.textContent = held;
+    view.style.left = ta.style.left;
+    view.style.top = ta.style.top;
+    view.style.height = ta.style.height;
+    view.style.lineHeight = ta.style.lineHeight;
+    view.style.fontFamily = term.options.fontFamily ?? "monospace";
+    view.style.fontSize = `${term.options.fontSize ?? 15}px`;
+    view.style.backgroundColor = term.options.theme?.background ?? "#000";
+    view.style.color = term.options.theme?.foreground ?? "#fff";
+    view.classList.add("active");
+  };
 
   /** Re-align with a box that was cleared or edited behind our back. */
   const resync = (box: string) => {
@@ -78,12 +125,17 @@ export function setupImeInput(term: Terminal, send: (data: string) => void) {
     if (native) return;
     const box = ta.value;
     resync(box);
-    if (box.length > sent.length) emit(box.slice(sent.length));
+    // Enter and Ctrl-C empty the textarea before xterm fires them (its
+    // `_keyDown`, so screen readers announce the deleted line), which takes
+    // the held character with it. `held` is what the box had.
+    const pending = box.length > sent.length ? box.slice(sent.length) : held;
+    if (pending) emit(pending);
     sent = box;
     if (box.length > 200) {
       ta.value = "";
       sent = "";
     }
+    paint();
   };
 
   const onInput = (e: Event) => {
@@ -100,6 +152,7 @@ export function setupImeInput(term: Terminal, send: (data: string) => void) {
       const echo = added === justRouted && Date.now() - justRoutedAt < 100;
       if (added && !echo) send(added);
       sent = box;
+      paint();
       return;
     }
     const last = box.codePointAt(box.length - 1) ?? 0;
@@ -114,14 +167,32 @@ export function setupImeInput(term: Terminal, send: (data: string) => void) {
       ta.value = "";
       sent = "";
     }
+    paint();
   };
   ta.addEventListener("input", onInput);
 
   const onCompositionStart = () => {
     native = true;
     sent = "";
+    paint();
   };
   ta.addEventListener("compositionstart", onCompositionStart);
+
+  // Losing focus finalizes whatever was composing, and xterm empties the box
+  // on blur — which would take the held character with it. `held` is read
+  // instead of the box because xterm's own blur handler runs first.
+  const onBlur = () => {
+    if (native || !held) return;
+    emit(held);
+    held = "";
+    sent = "";
+    view?.classList.remove("active");
+  };
+  ta.addEventListener("blur", onBlur);
+
+  // xterm re-parks the textarea whenever the cursor moves; follow it, so the
+  // view stays on the cell the character will land in.
+  const cursorSub = term.onCursorMove(paint);
 
   // While a syllable is composing, Backspace edits the IME buffer. Returning
   // false keeps xterm from consuming the key (and from sending \x7f for text
@@ -153,6 +224,9 @@ export function setupImeInput(term: Terminal, send: (data: string) => void) {
     dispose: () => {
       ta.removeEventListener("input", onInput);
       ta.removeEventListener("compositionstart", onCompositionStart);
+      ta.removeEventListener("blur", onBlur);
+      cursorSub.dispose();
+      view?.remove();
     },
   };
 }
