@@ -22,7 +22,7 @@ fn ssh_base(host: &str) -> Command {
 /// On-demand directory listing: local fs when `host` is None, otherwise a
 /// one-shot `ssh <host> ls` (SDD 3.3 — connect only when the explorer opens).
 #[tauri::command]
-pub fn fs_list_dir(host: Option<String>, path: String) -> Result<Vec<DirEntry>, String> {
+pub async fn fs_list_dir(host: Option<String>, path: String) -> Result<Vec<DirEntry>, String> {
     match host {
         None => {
             let mut out = Vec::new();
@@ -70,7 +70,7 @@ fn sort_entries(entries: &mut [DirEntry]) {
 }
 
 #[tauri::command]
-pub fn fs_read_file(host: Option<String>, path: String) -> Result<String, String> {
+pub async fn fs_read_file(host: Option<String>, path: String) -> Result<String, String> {
     match host {
         None => std::fs::read_to_string(&path).map_err(|e| e.to_string()),
         Some(h) => {
@@ -87,7 +87,7 @@ pub fn fs_read_file(host: Option<String>, path: String) -> Result<String, String
 }
 
 #[tauri::command]
-pub fn fs_write_file(host: Option<String>, path: String, content: String) -> Result<(), String> {
+pub async fn fs_write_file(host: Option<String>, path: String, content: String) -> Result<(), String> {
     match host {
         None => std::fs::write(&path, content).map_err(|e| e.to_string()),
         Some(h) => {
@@ -113,7 +113,7 @@ pub fn fs_write_file(host: Option<String>, path: String, content: String) -> Res
 }
 
 #[tauri::command]
-pub fn fs_mkdir(host: Option<String>, path: String) -> Result<(), String> {
+pub async fn fs_mkdir(host: Option<String>, path: String) -> Result<(), String> {
     match host {
         None => std::fs::create_dir(&path).map_err(|e| e.to_string()),
         Some(h) => {
@@ -130,7 +130,7 @@ pub fn fs_mkdir(host: Option<String>, path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn fs_create_file(host: Option<String>, path: String) -> Result<(), String> {
+pub async fn fs_create_file(host: Option<String>, path: String) -> Result<(), String> {
     match host {
         None => {
             if std::path::Path::new(&path).exists() {
@@ -179,7 +179,7 @@ fn percent_decode(s: &str) -> String {
 /// headers (`x-host`, percent-encoded `x-path`) so the body stays a plain
 /// binary payload.
 #[tauri::command]
-pub fn fs_upload(request: tauri::ipc::Request<'_>) -> Result<(), String> {
+pub async fn fs_upload(request: tauri::ipc::Request<'_>) -> Result<(), String> {
     let headers = request.headers();
     let host = headers
         .get("x-host")
@@ -222,7 +222,7 @@ pub fn fs_upload(request: tauri::ipc::Request<'_>) -> Result<(), String> {
 /// Copy a file into ~/Downloads (fetching it over ssh for remote pods).
 /// Returns the saved path. Never overwrites: collisions get ` (2)`, ` (3)`…
 #[tauri::command]
-pub fn fs_download(host: Option<String>, path: String) -> Result<String, String> {
+pub async fn fs_download(host: Option<String>, path: String) -> Result<String, String> {
     let dir = dirs::home_dir().ok_or("no home dir")?.join("Downloads");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
@@ -259,7 +259,7 @@ pub fn fs_download(host: Option<String>, path: String) -> Result<String, String>
 /// Read a file as base64 — used by the image viewer, which needs raw bytes
 /// (and must work for remote pods, where the file lives over ssh).
 #[tauri::command]
-pub fn fs_read_base64(host: Option<String>, path: String) -> Result<String, String> {
+pub async fn fs_read_base64(host: Option<String>, path: String) -> Result<String, String> {
     let bytes: Vec<u8> = match host {
         None => std::fs::read(&path).map_err(|e| e.to_string())?,
         Some(h) => {
@@ -299,12 +299,18 @@ pub struct HostStats {
     pub cpu: f32,
     pub mem_used_mb: u64,
     pub mem_total_mb: u64,
+    /// Identifies the box, so aliases that reach the same one share a poll.
+    pub machine: String,
 }
 
 /// CPU load and memory use for a pod's machine. One portable snippet covers
 /// macOS (top/vm_stat) and Linux (/proc), so the same call works for local
 /// and ssh pods.
-const STATS_SNIPPET: &str = r#"if [ "$(uname)" = "Darwin" ]; then
+const STATS_SNIPPET: &str = r#"ID=$(cat /etc/machine-id 2>/dev/null)
+[ -z "$ID" ] && ID=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')
+[ -z "$ID" ] && ID=$(hostname)
+echo "$ID"
+if [ "$(uname)" = "Darwin" ]; then
 C=$(top -l 2 -n 0 -s 0 2>/dev/null | awk '/^CPU usage/{u=$3;s=$5} END{gsub("%","",u);gsub("%","",s);print u+s}')
 T=$(( $(sysctl -n hw.memsize) / 1048576 ))
 F=$(vm_stat | awk '/Pages free|Pages inactive|Pages speculative/{gsub("\.","",$NF); s+=$NF} END{print int(s*4096/1048576)}')
@@ -320,7 +326,7 @@ echo "$C $((MT-MA)) $MT"
 fi"#;
 
 #[tauri::command]
-pub fn host_stats(host: Option<String>) -> Result<HostStats, String> {
+pub async fn host_stats(host: Option<String>) -> Result<HostStats, String> {
     let out = match host {
         None => Command::new("sh")
             .arg("-c")
@@ -336,6 +342,7 @@ pub fn host_stats(host: Option<String>) -> Result<HostStats, String> {
         return Err(String::from_utf8_lossy(&out.stderr).to_string());
     }
     let text = String::from_utf8_lossy(&out.stdout);
+    let machine = text.lines().next().unwrap_or("").trim().to_string();
     let line = text.lines().last().unwrap_or("").trim();
     let mut it = line.split_whitespace();
     let cpu: f32 = it.next().and_then(|v| v.parse().ok()).unwrap_or(0.0);
@@ -345,6 +352,7 @@ pub fn host_stats(host: Option<String>) -> Result<HostStats, String> {
         cpu: cpu.clamp(0.0, 100.0),
         mem_used_mb: used,
         mem_total_mb: total,
+        machine,
     })
 }
 
@@ -357,7 +365,7 @@ pub struct PathInfo {
 /// Does this path exist, and is it a directory? Used to decide whether a
 /// path clicked in the terminal opens in the explorer or the editor.
 #[tauri::command]
-pub fn fs_stat(host: Option<String>, path: String) -> Result<PathInfo, String> {
+pub async fn fs_stat(host: Option<String>, path: String) -> Result<PathInfo, String> {
     match host {
         None => match std::fs::metadata(&path) {
             Ok(m) => Ok(PathInfo {
@@ -387,7 +395,7 @@ pub fn fs_stat(host: Option<String>, path: String) -> Result<PathInfo, String> {
 /// Default working directory for a pod's explorer: $HOME locally, `~` resolved
 /// remotely.
 #[tauri::command]
-pub fn fs_home_dir(host: Option<String>) -> Result<String, String> {
+pub async fn fs_home_dir(host: Option<String>) -> Result<String, String> {
     match host {
         None => dirs::home_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -403,4 +411,26 @@ pub fn fs_home_dir(host: Option<String>) -> Result<String, String> {
             Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
         }
     }
+}
+
+/// Where the layout lives. Both shells write the same path on purpose: the
+/// webview's own storage is per-engine, so a layout saved in one build would
+/// be invisible to the other even though the tmux sessions behind the pods
+/// are shared.
+fn layout_file() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".config").join("omniagent").join("layout.json"))
+}
+
+#[tauri::command]
+pub async fn layout_read() -> Option<String> {
+    std::fs::read_to_string(layout_file()?).ok()
+}
+
+#[tauri::command]
+pub async fn layout_write(content: String) -> Result<(), String> {
+    let path = layout_file().ok_or("no home dir")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, content).map_err(|e| e.to_string())
 }

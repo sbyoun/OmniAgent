@@ -16,6 +16,82 @@ pub struct PtyInstance {
     /// when the pod is explicitly closed so sessions don't accumulate;
     /// preserved on app quit so the pod can restore.
     tmux_session: Option<String>,
+    /// Whether this pod created its session. A pod opened onto a session that
+    /// was already running — from the sessions list — is a guest: closing the
+    /// pod must leave the work alone.
+    owns_session: bool,
+}
+
+/// A stable id for the machine itself, so the fleet is grouped by box rather
+/// than by the route taken to reach it: an `~/.ssh/config` can hold several
+/// aliases for one server — a proxy jump from outside, a LAN address from
+/// inside, a VPN address — and each would otherwise list the same sessions
+/// again and poll the same machine again.
+pub const MACHINE_ID: &str = r#"ID=$(cat /etc/machine-id 2>/dev/null)
+[ -z "$ID" ] && ID=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')
+[ -z "$ID" ] && ID=$(hostname)
+echo "$ID""#;
+
+#[derive(Serialize, Clone)]
+pub struct SessionList {
+    pub machine: String,
+    pub sessions: Vec<TmuxSession>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct TmuxSession {
+    pub name: String,
+    /// Epoch seconds.
+    pub created: i64,
+    pub attached: bool,
+    pub windows: u32,
+}
+
+/// The tmux sessions on a machine, whoever started them. Pods appear here too
+/// (they are just named `omniagent-*`), so the list doubles as a way back into
+/// work the app itself left running.
+#[tauri::command]
+pub async fn tmux_sessions(host: Option<String>) -> SessionList {
+    // Both answers in one round trip; the machine id comes first.
+    let query = format!(
+        "{MACHINE_ID}\ntmux ls -F '#{{session_name}}\t#{{session_created}}\t#{{session_attached}}\t#{{session_windows}}' 2>/dev/null"
+    );
+    let out = match host {
+        None => std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&query)
+            .env(
+                "PATH",
+                format!(
+                    "{}:/opt/homebrew/bin:/usr/local/bin",
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output(),
+        Some(h) => std::process::Command::new("ssh")
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
+            .arg(&query)
+            .output(),
+    };
+    let Ok(out) = out else {
+        return SessionList { machine: String::new(), sessions: Vec::new() };
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let machine = lines.next().unwrap_or("").trim().to_string();
+    let sessions = lines
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let mut it = line.split('\t');
+            Some(TmuxSession {
+                name: it.next()?.to_string(),
+                created: it.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+                attached: it.next() == Some("1"),
+                windows: it.next().and_then(|v| v.parse().ok()).unwrap_or(1),
+            })
+        })
+        .collect();
+    SessionList { machine, sessions }
 }
 
 /// Monotonic generation per spawn. A pod id can be re-spawned (e.g. webview
@@ -52,6 +128,7 @@ pub fn pty_spawn(
     session: Option<String>,
     rows: u16,
     cols: u16,
+    owns_session: Option<bool>,
 ) -> Result<(), String> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -222,6 +299,7 @@ pub fn pty_spawn(
             child,
             host,
             tmux_session: session,
+            owns_session: owns_session.unwrap_or(true),
         },
     );
     Ok(())
@@ -259,7 +337,7 @@ pub fn pty_resize(
 /// moment the pod was opened, is how long the work has been running — the
 /// session outlives app restarts.
 #[tauri::command]
-pub fn tmux_session_started(host: Option<String>, session: String) -> Option<i64> {
+pub async fn tmux_session_started(host: Option<String>, session: String) -> Option<i64> {
     let query = format!(
         "tmux display -p -t '{}' '#{{session_created}}' 2>/dev/null",
         session.replace('\'', "")
@@ -308,7 +386,7 @@ pub fn pty_kill(state: State<'_, PtyManager>, id: String) -> Result<(), String> 
         // Explicit close: tear down the pod's backing tmux session too
         // (local or remote). Done on a thread so a slow ssh round-trip
         // never blocks closing the pod.
-        if let Some(name) = inst.tmux_session {
+        if let Some(name) = inst.tmux_session.filter(|_| inst.owns_session) {
             let host = inst.host;
             std::thread::spawn(move || match host {
                 None => {
@@ -333,4 +411,56 @@ pub fn pty_kill(state: State<'_, PtyManager>, id: String) -> Result<(), String> 
         }
     }
     Ok(())
+}
+
+/// End a session from the sessions list, whoever started it.
+#[tauri::command]
+pub async fn tmux_kill_session(host: Option<String>, name: String) {
+    let command = format!("tmux kill-session -t '{}'", name.replace('\'', ""));
+    let _ = match host {
+        None => std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .env(
+                "PATH",
+                format!(
+                    "{}:/opt/homebrew/bin:/usr/local/bin",
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output(),
+        Some(h) => std::process::Command::new("ssh")
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
+            .arg(&command)
+            .output(),
+    };
+}
+
+/// Rename a session, so naming a pod carries through to `tmux ls` and to the
+/// sessions panel. Returns false when the name is taken.
+#[tauri::command]
+pub async fn tmux_rename_session(host: Option<String>, from: String, to: String) -> bool {
+    let command = format!(
+        "tmux rename-session -t '{}' '{}'",
+        from.replace('\'', ""),
+        to.replace('\'', "")
+    );
+    let out = match host {
+        None => std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .env(
+                "PATH",
+                format!(
+                    "{}:/opt/homebrew/bin:/usr/local/bin",
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output(),
+        Some(h) => std::process::Command::new("ssh")
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
+            .arg(&command)
+            .output(),
+    };
+    out.map(|o| o.status.success()).unwrap_or(false)
 }
