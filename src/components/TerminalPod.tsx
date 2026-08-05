@@ -90,6 +90,46 @@ export interface PodParams {
   guest?: boolean;
   /** What the user called this pod, if anything. */
   name?: string;
+  /** Pane sizes, dragged by the splitters. */
+  explorerWidth?: number;
+  editorHeight?: number;
+}
+
+/**
+ * The bar between two panes. Dragging it resizes the one before it; the
+ * terminal refits on its own, since it is watching its container.
+ */
+function Splitter({
+  axis,
+  onDrag,
+  onDone,
+}: {
+  axis: "x" | "y";
+  onDrag: (delta: number) => void;
+  onDone: () => void;
+}) {
+  const last = useRef(0);
+  return (
+    <div
+      onPointerDown={(e) => {
+        e.currentTarget.setPointerCapture(e.pointerId);
+        last.current = axis === "x" ? e.clientX : e.clientY;
+      }}
+      onPointerMove={(e) => {
+        if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+        const now = axis === "x" ? e.clientX : e.clientY;
+        onDrag(now - last.current);
+        last.current = now;
+      }}
+      onPointerUp={(e) => {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+        onDone();
+      }}
+      className={`shrink-0 bg-surface-container-highest hover:bg-primary/50 transition-colors ${
+        axis === "x" ? "w-px hover:w-1 cursor-col-resize" : "h-px hover:h-1 cursor-row-resize"
+      }`}
+    />
+  );
 }
 
 
@@ -343,6 +383,12 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
   const editorPath = props.params.editorPath ?? null;
   const setEditorPath = (path: string | null) =>
     props.api.updateParameters({ editorPath: path ?? undefined });
+  const [explorerWidth, setExplorerWidth] = useState(
+    props.params.explorerWidth ?? 200,
+  );
+  const [editorHeight, setEditorHeight] = useState(
+    props.params.editorHeight ?? 320,
+  );
   const [explorerGoto, setExplorerGoto] = useState<{
     path: string;
     nonce: number;
@@ -619,7 +665,9 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       {/* Pod body: explorer | (editor above / terminal below — VS Code style) */}
       <div className="flex flex-1 min-h-0">
         {explorerOpen && (
+          <>
           <Explorer
+            width={explorerWidth}
             host={host}
             onOpenFile={(path) => {
               setEditorPath(path);
@@ -633,14 +681,34 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
             }}
             gotoPath={explorerGoto}
           />
+          <Splitter
+            axis="x"
+            onDrag={(dx) =>
+              setExplorerWidth((w) => Math.min(600, Math.max(120, w + dx)))
+            }
+            onDone={() =>
+              props.api.updateParameters({ explorerWidth })
+            }
+          />
+          </>
         )}
         <div className="flex flex-col flex-1 min-w-0 min-h-0">
           {editorOpen && (
-            <EditorPanel
-              host={host}
-              path={editorPath}
-              onClose={() => props.api.updateParameters({ editorOpen: false })}
-            />
+            <>
+              <EditorPanel
+                height={editorHeight}
+                host={host}
+                path={editorPath}
+                onClose={() => props.api.updateParameters({ editorOpen: false })}
+              />
+              <Splitter
+                axis="y"
+                onDrag={(dy) =>
+                  setEditorHeight((h) => Math.min(900, Math.max(80, h + dy)))
+                }
+                onDone={() => props.api.updateParameters({ editorHeight })}
+              />
+            </>
           )}
           <div className="flex-1 min-h-0 bg-surface-container-lowest p-1">
             <div ref={containerRef} className="h-full w-full" />

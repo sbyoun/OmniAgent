@@ -18,6 +18,8 @@ interface Props {
   gotoPath?: { path: string; nonce: number } | null;
   /** Directory to open on mount (restored from the saved layout). */
   initialPath?: string;
+  /** Set by the pod's splitter and remembered with the layout. */
+  width: number;
 }
 
 export function Explorer({
@@ -26,6 +28,7 @@ export function Explorer({
   onCwdChange,
   gotoPath,
   initialPath,
+  width,
 }: Props) {
   const [cwd, setCwd] = useState<string | null>(null);
   const [entries, setEntries] = useState<DirEntry[]>([]);
@@ -146,7 +149,8 @@ export function Explorer({
 
   return (
     <div
-      className={`w-[200px] shrink-0 border-r border-surface-container-highest bg-surface flex flex-col min-w-0 relative ${
+      style={{ width }}
+      className={`shrink-0 border-r border-surface-container-highest bg-surface flex flex-col min-w-0 relative ${
         dragOver ? "outline outline-2 -outline-offset-2 outline-primary-container" : ""
       }`}
       onDragOver={(e) => {

@@ -8,11 +8,13 @@ interface Props {
   host: string | null;
   path: string | null;
   onClose: () => void;
+  /** Set by the pod's splitter and remembered with the layout. */
+  height: number;
 }
 
 type SaveState = "clean" | "dirty" | "saving" | "saved" | "error";
 
-export function EditorPanel({ host, path, onClose }: Props) {
+export function EditorPanel({ host, path, onClose, height }: Props) {
   const [content, setContent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("clean");
@@ -119,7 +121,10 @@ export function EditorPanel({ host, path, onClose }: Props) {
   const language = path ? guessLanguage(path) : "plaintext";
 
   return (
-    <div className="h-1/2 shrink-0 border-b border-surface-container-highest bg-surface-container-lowest flex flex-col min-h-0">
+    <div
+      style={{ height }}
+      className="shrink-0 border-b border-surface-container-highest bg-surface-container-lowest flex flex-col min-h-0"
+    >
       <div className="h-6 shrink-0 bg-surface-container-low border-b border-surface-container-highest flex items-center justify-between px-2">
         <span
           className="text-[10px] font-mono text-on-surface-variant truncate"
