@@ -109,6 +109,23 @@ function createWindow() {
     },
   });
 
+  // Nothing may replace the app in this window. The preload is attached to
+  // the window, not to a page, so a remote site loaded here would be handed
+  // `window.omni` — pty, ssh and the filesystem. Links go to the browser.
+  const external = (url: string) => {
+    if (/^https?:/i.test(url)) void shell.openExternal(url);
+  };
+  win.webContents.on("will-navigate", (e, url) => {
+    const here = devUrl ?? "file://";
+    if (url.startsWith(here)) return;
+    e.preventDefault();
+    external(url);
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    external(url);
+    return { action: "deny" };
+  });
+
   if (devUrl) win.loadURL(devUrl);
   else win.loadFile(join(__dirname, "../dist/index.html"));
 }
@@ -196,6 +213,9 @@ function registerHandlers() {
     "tmux_rename_session",
     (_e, host: string | null, from: string, to: string) =>
       renameTmuxSession(host, from, to),
+  );
+  ipcMain.handle("open_external", (_e, url: string) =>
+    /^https?:/i.test(url) ? shell.openExternal(url) : undefined,
   );
   ipcMain.handle("layout_read", () => files.readLayout());
   ipcMain.handle("layout_write", (_e, content: string) => files.writeLayout(content));

@@ -133,6 +133,10 @@ export const tmuxRenameSession = (host: string | null, from: string, to: string)
 export const tmuxKillSession = (host: string | null, name: string) =>
   backend.call<void>("tmux_kill_session", { host, name });
 
+/** Hands a link to the user's browser. */
+export const openExternal = (url: string) =>
+  backend.call<void>("open_external", { url });
+
 /** The pod layout, kept in a file both shells read so it survives switching. */
 export const layoutRead = () => backend.call<string | null>("layout_read");
 

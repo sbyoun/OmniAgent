@@ -434,3 +434,14 @@ pub async fn layout_write(content: String) -> Result<(), String> {
     }
     std::fs::write(path, content).map_err(|e| e.to_string())
 }
+
+/// Open a link in the user's browser. Nothing may navigate the app's own
+/// webview: the page there is the app, and it is the only page trusted with
+/// the command surface.
+#[tauri::command]
+pub async fn open_external(app: tauri::AppHandle, url: String) {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        use tauri_plugin_opener::OpenerExt;
+        let _ = app.opener().open_url(url, None::<&str>);
+    }
+}

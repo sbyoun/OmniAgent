@@ -82,6 +82,7 @@ pub fn run() {
             remote_fs::fs_read_file,
             remote_fs::fs_write_file,
             remote_fs::fs_home_dir,
+            remote_fs::open_external,
             remote_fs::layout_read,
             remote_fs::layout_write,
             remote_fs::fs_mkdir,
