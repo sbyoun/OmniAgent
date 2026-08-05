@@ -100,12 +100,12 @@ with macOS, so it does not help users on today's systems.
 ## What to do about it
 
 **If you can choose your host: use Chromium (Electron).** It removes the class
-of bug rather than working around it. That is what this project did — see
-`electron/` for the port; the entire React/xterm.js/Monaco frontend was
-unchanged, only the pty/ssh/fs backend moved from Rust to Node.
+of bug rather than working around it. This project ships both shells over one
+frontend — `electron/` and `src-tauri/` — precisely so the choice is per
+machine rather than per project.
 
-**If you must stay on WKWebView:** the `main` branch (tag `v0.3.3`) carries
-`src/ime.ts`, a self-contained bridge — MIT like the rest — that:
+**If you must stay on WKWebView:** `src/ime.ts` is a self-contained bridge —
+MIT like the rest — that:
 
 - emits from the textarea instead of xterm's key path — everything except a
   trailing character that could still be composing, released once it is final;
@@ -118,9 +118,10 @@ unchanged, only the pty/ssh/fs backend moved from Rust to Node.
 - echoes the held syllable at the cursor, because the terminal cannot draw
   something it has not been sent.
 
-`tests/ime.test.mjs` there replays the recorded WebKit event trace, xterm's
-interleaved emissions included (`npm run test:ime`). Neither file is on this
-branch: Chromium fires composition events, so xterm.js needs no help.
+`tests/ime.test.mjs` replays the recorded WebKit event trace, xterm's
+interleaved emissions included (`npm run test:ime`). The Electron build
+carries the bridge too, inertly: composition events fire there, so it stands
+down on the first one.
 
 **Diagnostic:** `public/ime-check.html` reports in one screen whether a given
 webview fires composition events. Open it in the app (⌘⇧I) and in Safari and
