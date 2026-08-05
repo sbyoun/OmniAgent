@@ -94,10 +94,10 @@ jobs:
           releaseBody: |
             Two builds of the same app — take either one.
 
-            - **Electron** (`OmniAgent-*.dmg` / `.AppImage` / `.exe`) — larger,
+            - **Electron** (`OmniAgent-electron-*`) — larger,
               but its terminal takes Korean, Japanese and Chinese input
               reliably on macOS. WEBKIT-IME.md explains why that is not a given.
-            - **Tauri** (`OmniAgent_*.dmg` / `.deb` / `.msi`) — a tenth of the
+            - **Tauri** (`OmniAgent_*`) — a tenth of the
               size and lighter on memory.
           releaseDraft: true
           prerelease: false
