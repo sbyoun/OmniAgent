@@ -7,8 +7,45 @@ on:
 permissions:
   contents: write
 
+# One tag, two shells. Both jobs attach their artifacts to the same draft
+# release, so every version is available in either build.
 jobs:
-  build:
+  electron:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --mac --arm64 --x64
+          - platform: ubuntu-22.04
+            args: --linux
+          - platform: windows-latest
+            args: --win
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+
+      # electron-builder only packages what is already built.
+      - run: npm run build:app
+
+      - name: Build and publish
+        run: npx electron-builder ${{ matrix.args }} --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS artifacts are signed with the Developer ID certificate and
+          # notarized (build/notarize.cjs). Unset on the other runners, where
+          # both steps are skipped.
+          CSC_LINK: ${{ secrets.APPLE_CERTIFICATE }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+  tauri:
     strategy:
       fail-fast: false
       matrix:
@@ -19,19 +56,16 @@ jobs:
             args: --target x86_64-apple-darwin
           - platform: ubuntu-22.04
             args: ""
-          # Windows builds compile, but the local-shell spawner is still
-          # unix-only (SSH pods work). Kept in the matrix so the artifact
-          # exists for testing; drop it from the release if not wanted.
+          # Windows builds and runs, but the local shell spawner is unix-only
+          # (SSH pods work). Shipped so the artifact exists for testing.
           - platform: windows-latest
             args: ""
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
@@ -42,14 +76,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - run: npm install
+      - run: npm ci
 
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # macOS builds are signed with the Developer ID certificate and
-          # notarized, so downloads open without the Gatekeeper detour.
-          # These are unset on other runners, where tauri-action skips both.
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
@@ -60,7 +91,14 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "OmniAgent ${{ github.ref_name }}"
-          releaseBody: "See the assets below to download and install this version."
+          releaseBody: |
+            Two builds of the same app — take either one.
+
+            - **Electron** (`OmniAgent-*.dmg` / `.AppImage` / `.exe`) — larger,
+              but its terminal takes Korean, Japanese and Chinese input
+              reliably on macOS. WEBKIT-IME.md explains why that is not a given.
+            - **Tauri** (`OmniAgent_*.dmg` / `.deb` / `.msi`) — a tenth of the
+              size and lighter on memory.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
