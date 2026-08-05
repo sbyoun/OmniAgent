@@ -4,10 +4,12 @@ const { notarize } = require("@electron/notarize");
  * Notarize the signed app so Gatekeeper opens it without the "unidentified
  * developer" detour.
  *
- * Locally this uses the `notarytool` keychain profile set up once with
- * `xcrun notarytool store-credentials`; CI has no keychain, so it falls back
- * to the Apple ID + app-specific password in the environment. Set
- * SKIP_NOTARIZE=1 for a quick unnotarized build while iterating.
+ * An App Store Connect API key is the first choice: it does not expire the way
+ * app-specific passwords do, and it is not tied to one person's Apple ID.
+ * Failing that, an Apple ID and app-specific password from the environment,
+ * and locally the `notarytool` keychain profile stored once with
+ * `xcrun notarytool store-credentials`. SKIP_NOTARIZE=1 skips the wait while
+ * iterating.
  */
 module.exports = async function notarizeApp(context) {
   const { electronPlatformName, appOutDir, packager } = context;
@@ -15,9 +17,24 @@ module.exports = async function notarizeApp(context) {
   console.log("  • notarizing (this takes a few minutes)");
 
   const appPath = `${appOutDir}/${packager.appInfo.productFilename}.app`;
-  const { APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID } = process.env;
+  const {
+    APPLE_API_KEY_PATH,
+    APPLE_API_KEY_ID,
+    APPLE_API_ISSUER,
+    APPLE_ID,
+    APPLE_PASSWORD,
+    APPLE_TEAM_ID,
+  } = process.env;
 
-  if (APPLE_ID && APPLE_PASSWORD && APPLE_TEAM_ID) {
+  if (APPLE_API_KEY_PATH && APPLE_API_KEY_ID && APPLE_API_ISSUER) {
+    await notarize({
+      tool: "notarytool",
+      appPath,
+      appleApiKey: APPLE_API_KEY_PATH,
+      appleApiKeyId: APPLE_API_KEY_ID,
+      appleApiIssuer: APPLE_API_ISSUER,
+    });
+  } else if (APPLE_ID && APPLE_PASSWORD && APPLE_TEAM_ID) {
     await notarize({
       tool: "notarytool",
       appPath,
