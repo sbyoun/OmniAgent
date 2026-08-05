@@ -2,6 +2,9 @@ import { app, BrowserWindow, Menu, ipcMain, shell } from "electron";
 import { join } from "node:path";
 import * as files from "./files";
 import {
+  killTmuxSession,
+  renameTmuxSession,
+  listTmuxSessions,
   killAllPtys,
   killPty,
   resizePty,
@@ -132,8 +135,15 @@ function registerHandlers() {
 
   ipcMain.on(
     "pty_spawn",
-    (e, id: string, host: string | null, session: string | null, rows: number, cols: number) =>
-      spawnPty(e.sender, id, host, session, rows, cols),
+    (
+      e,
+      id: string,
+      host: string | null,
+      session: string | null,
+      rows: number,
+      cols: number,
+      ownsSession: boolean,
+    ) => spawnPty(e.sender, id, host, session, rows, cols, ownsSession),
   );
   ipcMain.on("pty_write", (_e, id: string, data: string) => writePty(id, data));
   ipcMain.on("pty_resize", (_e, id: string, rows: number, cols: number) =>
@@ -177,4 +187,16 @@ function registerHandlers() {
   );
   ipcMain.handle("fs_home_dir", (_e, host: string | null) => files.homeDir(host));
   ipcMain.handle("host_stats", (_e, host: string | null) => files.hostStats(host));
+
+  ipcMain.handle("tmux_sessions", (_e, host: string | null) => listTmuxSessions(host));
+  ipcMain.handle("tmux_kill_session", (_e, host: string | null, name: string) =>
+    killTmuxSession(host, name),
+  );
+  ipcMain.handle(
+    "tmux_rename_session",
+    (_e, host: string | null, from: string, to: string) =>
+      renameTmuxSession(host, from, to),
+  );
+  ipcMain.handle("layout_read", () => files.readLayout());
+  ipcMain.handle("layout_write", (_e, content: string) => files.writeLayout(content));
 }

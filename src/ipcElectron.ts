@@ -29,7 +29,7 @@ export const electronBackend: Backend = {
  * order. The order is the one the handlers in `electron/main.ts` declare.
  */
 const ORDER: Record<string, string[]> = {
-  pty_spawn: ["id", "host", "session", "rows", "cols"],
+  pty_spawn: ["id", "host", "session", "rows", "cols", "ownsSession"],
   pty_write: ["id", "data"],
   pty_resize: ["id", "rows", "cols"],
   pty_kill: ["id"],
@@ -44,6 +44,10 @@ const ORDER: Record<string, string[]> = {
   fs_stat: ["host", "path"],
   fs_home_dir: ["host"],
   host_stats: ["host"],
+  layout_write: ["content"],
+  tmux_sessions: ["host"],
+  tmux_kill_session: ["host", "name"],
+  tmux_rename_session: ["host", "from", "to"],
 };
 
 function positional(command: string, args?: Record<string, unknown>): unknown[] {

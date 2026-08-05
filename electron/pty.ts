@@ -13,6 +13,70 @@ interface Instance {
    * the pod can restore.
    */
   session: string | null;
+  /**
+   * Whether this pod created its session. A pod opened onto a session that was
+   * already running — from the sessions list — is a guest: closing the pod
+   * must leave the work alone.
+   */
+  ownsSession: boolean;
+}
+
+/**
+ * A stable id for the machine itself, so the fleet is grouped by box rather
+ * than by the route taken to reach it: an `~/.ssh/config` can hold several
+ * aliases for one server — a proxy jump from outside, a LAN address from
+ * inside, a VPN address — and each would otherwise list the same sessions
+ * again and poll the same machine again.
+ */
+const MACHINE_ID = `ID=$(cat /etc/machine-id 2>/dev/null)
+[ -z "$ID" ] && ID=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')
+[ -z "$ID" ] && ID=$(hostname)
+echo "$ID"`;
+
+export interface TmuxSession {
+  name: string;
+  /** Epoch seconds. */
+  created: number;
+  attached: boolean;
+  windows: number;
+}
+
+/**
+ * The tmux sessions on a machine, whoever started them. Pods appear here too
+ * (they are just named `omniagent-*`), so the list doubles as a way back into
+ * work the app itself left running.
+ */
+export function listTmuxSessions(
+  host: string | null,
+): Promise<{ machine: string; sessions: TmuxSession[] }> {
+  // Both answers in one round trip; the machine id comes first.
+  const query = `${MACHINE_ID}
+tmux ls -F '#{session_name}\t#{session_created}\t#{session_attached}\t#{session_windows}' 2>/dev/null`;
+  const [file, args] = host
+    ? (["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, query]] as const)
+    : (["sh", ["-c", query]] as const);
+  return new Promise((resolve) => {
+    execFile(
+      file,
+      args as string[],
+      { env: { ...process.env, PATH: toolPath } },
+      (_err, stdout) => {
+        const [machine = "", ...lines] = stdout.split("\n");
+        resolve({
+          machine: machine.trim(),
+          sessions: lines.filter(Boolean).map((line) => {
+            const [name, created, attached, windows] = line.split("\t");
+            return {
+              name,
+              created: Number.parseInt(created, 10) || 0,
+              attached: attached === "1",
+              windows: Number.parseInt(windows, 10) || 1,
+            };
+          }),
+        });
+      },
+    );
+  });
 }
 
 const instances = new Map<string, Instance>();
@@ -75,6 +139,7 @@ export function spawnPty(
   session: string | null,
   rows: number,
   cols: number,
+  ownsSession = true,
 ): void {
   // Supersede any existing instance for this pod id.
   const existing = instances.get(id);
@@ -130,7 +195,7 @@ export function spawnPty(
     sender.send("pty-exit", { id });
   });
 
-  instances.set(id, { proc, host, session });
+  instances.set(id, { proc, host, session, ownsSession });
 }
 
 export function writePty(id: string, data: string): void {
@@ -146,6 +211,45 @@ export function resizePty(id: string, rows: number, cols: number): void {
 }
 
 /**
+ * Rename a session, so naming a pod carries through to `tmux ls` and to the
+ * sessions panel. Fails harmlessly when the name is taken.
+ */
+export function renameTmuxSession(
+  host: string | null,
+  from: string,
+  to: string,
+): Promise<boolean> {
+  const command = `tmux rename-session -t '${quote(from)}' '${quote(to)}'`;
+  const [file, args] = host
+    ? (["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command]] as const)
+    : (["sh", ["-c", command]] as const);
+  return new Promise((resolve) => {
+    execFile(
+      file,
+      args as string[],
+      { env: { ...process.env, PATH: toolPath } },
+      (err) => resolve(!err),
+    );
+  });
+}
+
+/** End a session from the sessions list, whoever started it. */
+export function killTmuxSession(host: string | null, name: string): Promise<void> {
+  const command = `tmux kill-session -t '${quote(name)}'`;
+  const [file, args] = host
+    ? (["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command]] as const)
+    : (["sh", ["-c", command]] as const);
+  return new Promise((resolve) => {
+    execFile(
+      file,
+      args as string[],
+      { env: { ...process.env, PATH: toolPath } },
+      () => resolve(),
+    );
+  });
+}
+
+/**
  * Explicit close: tear down the pod's backing tmux session too, so sessions
  * don't pile up. Detached so a slow ssh round-trip never blocks closing.
  */
@@ -156,7 +260,7 @@ export function killPty(id: string): void {
   generations.delete(id);
   inst.proc.kill();
 
-  if (!inst.session) return;
+  if (!inst.session || !inst.ownsSession) return;
   const name = quote(inst.session);
   if (inst.host) {
     spawn("ssh", [

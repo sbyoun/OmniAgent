@@ -12,6 +12,7 @@ import {
 import {
   fsHomeDir,
   fsStat,
+  tmuxRenameSession,
   tmuxSessionStarted,
   onPtyExit,
   onPtyOutput,
@@ -77,6 +78,18 @@ export interface PodParams {
   explorerPath?: string;
   /** File open in the editor — restored with the layout. */
   editorPath?: string;
+  /**
+   * The tmux session behind this pod. Absent until something names it —
+   * `omniagent-<pod id>` is the default.
+   */
+  session?: string;
+  /**
+   * True for a pod opened onto a session that was already running. A guest
+   * leaves the session alone when it closes, and never renames it.
+   */
+  guest?: boolean;
+  /** What the user called this pod, if anything. */
+  name?: string;
 }
 
 
@@ -153,12 +166,14 @@ function Meters({ stats }: { stats: HostStats | null }) {
 export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
   const {
     label,
+    name,
     status = "connecting",
     activity = "idle",
     startedAt,
     explorerOpen,
     editorOpen,
   } = props.params;
+  const [renaming, setRenaming] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [stats, setStats] = useState<HostStats | null>(null);
   const [, tick] = useState(0);
@@ -199,6 +214,29 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
   // Keep button clicks from starting a tab drag.
   const guard = (e: React.MouseEvent) => e.stopPropagation();
 
+  /**
+   * Naming a pod names its tmux session too, so the name shows up in the
+   * sessions panel and in a plain `tmux ls` — the pod is a view onto the
+   * session, and `pod-4` says nothing about what is running in it. Sessions
+   * the pod is only visiting keep their own name.
+   */
+  const rename = async (value: string) => {
+    setRenaming(false);
+    const label = value.trim();
+    if (label === (name ?? "")) return;
+    props.api.updateParameters({ name: label || undefined });
+
+    const { host, session, guest } = props.params;
+    if (guest) return;
+    const slug = label.toLowerCase().replace(/\s+/g, "-").replace(/[^\w.-]/g, "");
+    const from = session ?? `omniagent-${props.api.id}`;
+    const to = slug ? `omniagent-${slug}` : `omniagent-${props.api.id}`;
+    if (to === from) return;
+    if (await tmuxRenameSession(host, from, to).catch(() => false)) {
+      props.api.updateParameters({ session: to });
+    }
+  };
+
   const iconClass = (active: boolean | undefined) =>
     `material-symbols-outlined text-[16px] cursor-pointer ${
       active ? "text-primary" : "text-on-surface-variant hover:text-on-surface"
@@ -208,9 +246,32 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
     <div className="flex items-center justify-between gap-4 h-full w-full px-3 cursor-grab active:cursor-grabbing select-none">
       <div className="flex items-center gap-2 min-w-0">
         <div className={`w-2 h-2 rounded-full shrink-0 ${dotClass}`} />
-        <span className="text-[11px] font-medium text-on-surface uppercase tracking-wider truncate">
-          {label}
-        </span>
+        {renaming ? (
+          <input
+            autoFocus
+            defaultValue={name ?? ""}
+            placeholder={label}
+            onMouseDown={(e) => e.stopPropagation()}
+            onBlur={(e) => rename(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") rename(e.currentTarget.value);
+              if (e.key === "Escape") setRenaming(false);
+            }}
+            className="text-[11px] font-medium bg-surface-container-high text-on-surface rounded px-1 py-0.5 w-32 outline-none border border-primary"
+          />
+        ) : (
+          <span
+            className="text-[11px] font-medium text-on-surface uppercase tracking-wider truncate"
+            title="Double-click to name this pod"
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setRenaming(true);
+            }}
+          >
+            {name || label}
+          </span>
+        )}
       </div>
       <div className="flex items-center gap-3 shrink-0">
         {status === "running" && activity === "attention" && (
@@ -387,8 +448,8 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
         // id), local or remote — so opening the same server twice gives two
         // independent sessions, and each pod restores its own content when
         // the app is reopened.
-        const session = `omniagent-${podId}`;
-        await ptySpawn(podId, host, session, term.rows, term.cols);
+        const session = props.params.session ?? `omniagent-${podId}`;
+        await ptySpawn(podId, host, session, term.rows, term.cols, !props.params.guest);
         if (!disposed) {
           props.api.updateParameters({ status: "running" });
           // Uptime counts the tmux session's life, which survives app

@@ -3,6 +3,23 @@ import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+/**
+ * Where the layout lives. Both shells write the same path on purpose: the
+ * webview's own storage is per-engine, so a layout saved in one build would be
+ * invisible to the other even though the tmux sessions behind the pods are
+ * shared.
+ */
+const LAYOUT_FILE = join(homedir(), ".config", "omniagent", "layout.json");
+
+export async function readLayout(): Promise<string | null> {
+  return fs.readFile(LAYOUT_FILE, "utf8").catch(() => null);
+}
+
+export async function writeLayout(content: string): Promise<void> {
+  await fs.mkdir(join(homedir(), ".config", "omniagent"), { recursive: true });
+  await fs.writeFile(LAYOUT_FILE, content);
+}
+
 export interface DirEntry {
   name: string;
   is_dir: boolean;
@@ -17,6 +34,8 @@ export interface HostStats {
   cpu: number;
   mem_used_mb: number;
   mem_total_mb: number;
+  /** Identifies the box, so aliases that reach the same one can share a poll. */
+  machine: string;
 }
 
 /** Quote a path for use inside a remote shell command. */
@@ -224,7 +243,11 @@ export async function homeDir(host: string | null): Promise<string> {
  * macOS (top/vm_stat) and Linux (/proc), so the same call works for local and
  * ssh pods.
  */
-const STATS_SNIPPET = `if [ "$(uname)" = "Darwin" ]; then
+const STATS_SNIPPET = `ID=$(cat /etc/machine-id 2>/dev/null)
+[ -z "$ID" ] && ID=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')
+[ -z "$ID" ] && ID=$(hostname)
+echo "$ID"
+if [ "$(uname)" = "Darwin" ]; then
 C=$(top -l 2 -n 0 -s 0 2>/dev/null | awk '/^CPU usage/{u=$3;s=$5} END{gsub("%","",u);gsub("%","",s);print u+s}')
 T=$(( $(sysctl -n hw.memsize) / 1048576 ))
 F=$(vm_stat | awk '/Pages free|Pages inactive|Pages speculative/{gsub("\\.","",$NF); s+=$NF} END{print int(s*4096/1048576)}')
@@ -247,11 +270,12 @@ export async function hostStats(host: string | null): Promise<HostStats> {
           err ? reject(new Error(stderr || err.message)) : resolve(stdout),
         ),
       );
-  const line = out.trim().split("\n").pop() ?? "";
-  const [cpu, used, total] = line.trim().split(/\s+/).map(Number);
+  const lines = out.trim().split("\n");
+  const [cpu, used, total] = (lines.pop() ?? "").trim().split(/\s+/).map(Number);
   return {
     cpu: Math.min(100, Math.max(0, cpu || 0)),
     mem_used_mb: used || 0,
     mem_total_mb: total || 0,
+    machine: (lines.shift() ?? "").trim(),
   };
 }
