@@ -40,6 +40,8 @@ export interface HostStats {
   cpu: number;
   mem_used_mb: number;
   mem_total_mb: number;
+  /** Identifies the box, so aliases that reach the same one share a poll. */
+  machine: string;
 }
 
 export const listSshHosts = () => backend.call<SshHost[]>("list_ssh_hosts");
@@ -50,7 +52,19 @@ export const ptySpawn = (
   session: string | null,
   rows: number,
   cols: number,
-) => backend.call<void>("pty_spawn", { id, host, session, rows, cols });
+  /** False when attaching to a session the app did not create. */
+  ownsSession = true,
+) =>
+  backend.call<void>("pty_spawn", {
+    id,
+    host,
+    session,
+    rows,
+    cols,
+    ownsSession,
+    // Rust names it in snake_case.
+    owns_session: ownsSession,
+  });
 
 export const ptyWrite = (id: string, data: string) =>
   backend.call<void>("pty_write", { id, data });
@@ -92,6 +106,41 @@ export const fsStat = (host: string | null, path: string) =>
 /** Copies the file into ~/Downloads and resolves with the saved path. */
 export const fsDownload = (host: string | null, path: string) =>
   backend.call<string>("fs_download", { host, path });
+
+export interface TmuxSession {
+  name: string;
+  /** Epoch seconds. */
+  created: number;
+  attached: boolean;
+  windows: number;
+}
+
+export interface SessionList {
+  /** Stable id of the machine behind this alias — several may reach one box. */
+  machine: string;
+  sessions: TmuxSession[];
+}
+
+/** Every tmux session on a machine, the app's own and everyone else's. */
+export const tmuxSessions = (host: string | null) =>
+  backend.call<SessionList>("tmux_sessions", { host });
+
+/** Renames a session; false when something already has that name. */
+export const tmuxRenameSession = (host: string | null, from: string, to: string) =>
+  backend.call<boolean>("tmux_rename_session", { host, from, to });
+
+/** Ends a session for good — the work inside it goes with it. */
+export const tmuxKillSession = (host: string | null, name: string) =>
+  backend.call<void>("tmux_kill_session", { host, name });
+
+/** The pod layout, kept in a file both shells read so it survives switching. */
+export const layoutRead = () => backend.call<string | null>("layout_read");
+
+export const layoutWrite = (content: string) =>
+  backend.call<void>("layout_write", { content });
+
+/** Which shell this build is running in — shown in the header. */
+export const shellName = "__TAURI_INTERNALS__" in window ? "Tauri" : "Electron";
 
 export const hostStats = (host: string | null) =>
   backend.call<HostStats>("host_stats", { host });

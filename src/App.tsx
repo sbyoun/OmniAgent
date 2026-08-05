@@ -5,11 +5,12 @@ import {
   themeDark,
 } from "dockview-react";
 import { useEffect, useRef, useState } from "react";
-import { listSshHosts, SshHost } from "./ipc";
+import { layoutRead, layoutWrite, listSshHosts, shellName, SshHost } from "./ipc";
 import { startWindowDrag } from "./window";
 import { HostStats, subscribeHostStats } from "./hostStats";
 import { setSetting, useSettings } from "./settings";
 import { PodParams, PodTab, TerminalPod } from "./components/TerminalPod";
+import { Sessions } from "./components/Sessions";
 
 const components = { terminal: TerminalPod };
 const tabComponents = { pod: PodTab };
@@ -29,7 +30,7 @@ interface FleetSummary {
 
 export default function App() {
   const [hosts, setHosts] = useState<SshHost[]>([]);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebar, setSidebar] = useState<"fleet" | "sessions" | null>("fleet");
   const [podCount, setPodCount] = useState(0);
   const [fleet, setFleet] = useState<FleetSummary>({
     working: 0,
@@ -94,10 +95,11 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  const openPod = (host: string | null) => {
+  const openPod = (host: string | null, session?: string) => {
     const api = apiRef.current;
     if (!api) return;
     podCounter += 1;
+    const name = session?.replace(/^omniagent-/, "");
     api.addPanel<PodParams>({
       id: `pod-${podCounter}`,
       component: "terminal",
@@ -105,8 +107,14 @@ export default function App() {
       title: host ? `[${host.toUpperCase()}]` : "[LOCAL]",
       params: {
         host,
-        label: host ? `${host} · SSH` : "LOCAL · SHELL",
+        label: session
+          ? `${host ?? "local"} · ${name}`
+          : host
+            ? `${host} · SSH`
+            : "LOCAL · SHELL",
         status: "connecting",
+        session,
+        guest: session !== undefined,
       },
       // Split right of the active group so pods tile into a grid instead of
       // stacking as tabs.
@@ -124,11 +132,16 @@ export default function App() {
 
     // Restore the previous session: pods reopen with the same hosts and grid
     // arrangement, and each pod re-spawns its connection (remote pods reattach
-    // to their tmux session, so terminal content survives too).
-    const saved =
-      localStorage.getItem(LAYOUT_KEY) ??
-      localStorage.getItem(LEGACY_LAYOUT_KEY);
-    if (saved) {
+    // to their tmux session, so terminal content survives too). The layout
+    // comes from a file rather than localStorage so that switching between the
+    // Electron and Tauri builds — which have separate webview storage — lands
+    // on the same pods, the way the tmux sessions behind them already do.
+    const restore = async () => {
+      const saved =
+        (await layoutRead().catch(() => null)) ??
+        localStorage.getItem(LAYOUT_KEY) ??
+        localStorage.getItem(LEGACY_LAYOUT_KEY);
+      if (!saved) return;
       try {
         event.api.fromJSON(JSON.parse(saved));
         for (const p of event.api.panels) {
@@ -137,17 +150,17 @@ export default function App() {
         }
       } catch (e) {
         console.error("[OmniAgent] layout restore failed:", e);
-        localStorage.removeItem(LAYOUT_KEY);
       }
       sync();
-    }
+    };
+    void restore();
 
     // Persist every layout change (add/close/move/resize), debounced.
     let timer: number | undefined;
     event.api.onDidLayoutChange(() => {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
-        localStorage.setItem(LAYOUT_KEY, JSON.stringify(event.api.toJSON()));
+        void layoutWrite(JSON.stringify(event.api.toJSON())).catch(() => {});
       }, 500);
     });
   };
@@ -229,6 +242,11 @@ export default function App() {
           <span className="text-[11px] text-outline tracking-widest">
             CONTROL TOWER
           </span>
+          {/* Both shells ship under the same name, icon and version — say
+              which one this is, so a bug report can start from that. */}
+          <span className="text-[10px] text-outline/70 tracking-wider border border-surface-container-highest rounded px-1.5 py-px">
+            {shellName}
+          </span>
         </div>
       </div>
       <div className="flex flex-1 min-h-0">
@@ -242,14 +260,27 @@ export default function App() {
         <nav className="flex flex-col gap-4 w-full items-center">
           <button
             className={`flex items-center justify-center w-full py-2 border-l-2 ${
-              sidebarOpen
+              sidebar === "fleet"
                 ? "text-primary border-primary"
                 : "text-on-surface-variant border-transparent hover:text-on-surface"
             }`}
             title="Fleet (SSH hosts)"
-            onClick={() => setSidebarOpen((v) => !v)}
+            onClick={() => setSidebar((v) => (v === "fleet" ? null : "fleet"))}
           >
             <span className="material-symbols-outlined">grid_view</span>
+          </button>
+          <button
+            className={`flex items-center justify-center w-full py-2 border-l-2 ${
+              sidebar === "sessions"
+                ? "text-primary border-primary"
+                : "text-on-surface-variant border-transparent hover:text-on-surface"
+            }`}
+            title="Running tmux sessions"
+            onClick={() =>
+              setSidebar((v) => (v === "sessions" ? null : "sessions"))
+            }
+          >
+            <span className="material-symbols-outlined">lan</span>
           </button>
           <button
             className="flex items-center justify-center w-full py-2 text-on-surface-variant hover:text-on-surface border-l-2 border-transparent"
@@ -303,7 +334,23 @@ export default function App() {
 
         <div className="flex flex-1 min-h-0">
           {/* Host sidebar — auto-populated from ~/.ssh/config (zero-config) */}
-          {sidebarOpen && (
+          {sidebar === "sessions" && (
+            <aside className="w-sidebar-width shrink-0 bg-surface-container-lowest border-r border-surface-container-highest flex flex-col">
+              <Sessions
+                hosts={hosts}
+                onOpen={openPod}
+                openSessions={() =>
+                  new Set(
+                    (apiRef.current?.panels ?? []).map((p) => {
+                      const prm = p.params as PodParams | undefined;
+                      return `${prm?.host ?? "local"}:${prm?.session ?? `omniagent-${p.id}`}`;
+                    }),
+                  )
+                }
+              />
+            </aside>
+          )}
+          {sidebar === "fleet" && (
             <aside className="w-sidebar-width shrink-0 bg-surface-container-lowest border-r border-surface-container-highest flex flex-col">
               <div className="h-8 shrink-0 flex items-center px-3 border-b border-surface-container-highest">
                 <span className="text-[11px] font-semibold uppercase tracking-widest text-on-surface-variant">
