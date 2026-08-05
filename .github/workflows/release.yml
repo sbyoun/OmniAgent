@@ -54,6 +54,21 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
 
+  notes:
+    needs: [electron, tauri]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Whichever build reaches the release first creates the draft, and
+      # electron-builder names it after the bare version with an empty body.
+      - name: Title the release
+        run: |
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "OmniAgent $TAG" --notes-file .github/release-notes.md
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+
   tauri:
     strategy:
       fail-fast: false
@@ -110,14 +125,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "OmniAgent ${{ github.ref_name }}"
-          releaseBody: |
-            Two builds of the same app — take either one.
-
-            - **Electron** (`OmniAgent-electron-*`) — larger,
-              but its terminal takes Korean, Japanese and Chinese input
-              reliably on macOS. WEBKIT-IME.md explains why that is not a given.
-            - **Tauri** (`OmniAgent_*`) — a tenth of the
-              size and lighter on memory.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
