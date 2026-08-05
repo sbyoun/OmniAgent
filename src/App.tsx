@@ -5,8 +5,8 @@ import {
   themeDark,
 } from "dockview-react";
 import { useEffect, useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listSshHosts, SshHost } from "./ipc";
+import { startWindowDrag } from "./window";
 import { HostStats, subscribeHostStats } from "./hostStats";
 import { setSetting, useSettings } from "./settings";
 import { PodParams, PodTab, TerminalPod } from "./components/TerminalPod";
@@ -51,7 +51,7 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.metaKey && e.shiftKey && e.code === "KeyI") {
         e.preventDefault();
-        location.href = "/ime-check.html";
+        location.href = new URL("ime-check.html", location.href).href;
       }
     };
     window.addEventListener("keydown", onKey);
@@ -208,16 +208,14 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen w-screen bg-surface text-on-surface">
-      {/* Custom title bar strip — native traffic lights overlay this area
-          (titleBarStyle: Overlay), so it doubles as the window drag region. */}
+      {/* Custom title bar strip — native traffic lights overlay this area, so
+          it doubles as the window drag region. Electron gets that from the
+          app-region style; Tauri has no such property and drags through its
+          own API instead. */}
       <div
         className="h-9 shrink-0 bg-surface-container-lowest border-b border-surface-container-highest flex items-center justify-center relative"
-        onMouseDown={(e) => {
-          if (e.button !== 0) return;
-          const win = getCurrentWindow();
-          if (e.detail === 2) win.toggleMaximize();
-          else win.startDragging();
-        }}
+        style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+        onMouseDown={startWindowDrag}
       >
         <div className="flex items-center gap-2 pointer-events-none">
           <div className="w-5 h-5 bg-primary rounded flex items-center justify-center">

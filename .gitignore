@@ -30,3 +30,5 @@ docs/
 *.sln
 *.sw?
 dist-test
+dist-electron
+release

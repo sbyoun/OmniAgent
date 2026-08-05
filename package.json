@@ -1,36 +1,105 @@
 {
   "name": "omniagent",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.5.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "dev:electron": "npm run build:main && cross-env VITE_DEV_SERVER_URL=http://localhost:1420 electron .",
+    "build:main": "node scripts/build-electron.mjs",
+    "build:app": "vite build && npm run build:main",
+    "package": "npm run build:app && electron-builder",
+    "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true",
     "tauri": "tauri",
     "test:ime": "esbuild src/ime.ts --bundle --format=esm --external:@xterm/xterm --outfile=dist-test/ime.mjs --log-level=error && node tests/ime.test.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
-    "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2",
     "@xterm/addon-clipboard": "^0.2.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "dockview-react": "^7.0.4",
     "dompurify": "^3.4.12",
     "marked": "^18.0.7",
+    "node-pty": "^1.1.0",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2"
   },
   "devDependencies": {
+    "@electron/notarize": "^3.1.1",
     "@tailwindcss/vite": "^4.3.3",
-    "@tauri-apps/cli": "^2",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
+    "cross-env": "^10.1.0",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
     "tailwindcss": "^4.3.3",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "@tauri-apps/cli": "^2"
+  },
+  "main": "dist-electron/main.cjs",
+  "description": "A control tower for AI agent fleets across your servers",
+  "author": {
+    "name": "SunBum Youn",
+    "email": "cjaiproduct@gmail.com"
+  },
+  "build": {
+    "appId": "com.sunbumyoun.omniagent",
+    "productName": "OmniAgent",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/node-pty/**"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "build/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": false
+    },
+    "afterSign": "build/notarize.cjs",
+    "publish": {
+      "provider": "github",
+      "owner": "sbyoun",
+      "repo": "OmniAgent",
+      "releaseType": "draft"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "icon": "build/icon.ico"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development"
+    }
   }
 }

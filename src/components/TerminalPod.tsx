@@ -97,6 +97,11 @@ function cleanPath(raw: string): string {
   return p;
 }
 
+/** The bits of xterm's internals the pod reaches into. */
+interface PodCore {
+  _selectionService?: { shouldForceSelection: (e: MouseEvent) => boolean };
+}
+
 const TERM_THEME = {
   background: "#0e0e0e",
   foreground: "#e5e2e1",
@@ -295,11 +300,6 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       cursorBlink: true,
       theme: TERM_THEME,
       scrollback: 5000,
-      // tmux owns the mouse (so the wheel scrolls its scrollback), and it
-      // copies and clears the highlight the moment the drag ends. Holding
-      // Option takes the drag back for the browser: the selection stays put
-      // like in any other text view, and ⌘C copies it.
-      macOptionClickForcesSelection: true,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -314,6 +314,17 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     // text and the mouse-to-cell mapping on slightly different grids.
     const fontLoaded = document.fonts.check('13px "JetBrains Mono"');
     term.open(el);
+
+    // tmux has to own the mouse for the wheel to scroll its scrollback, but
+    // that also hands it drag-selection — and tmux copies and clears the
+    // highlight the instant the drag ends, so a selection can never be looked
+    // at, adjusted, or extended. Take left-button drags back for the browser:
+    // xterm skips reporting them and selects natively instead (the selection
+    // stays until you click away, ⌘C copies it), while the wheel and every
+    // other button still report to tmux.
+    const selection = (term as unknown as { _core?: PodCore })._core
+      ?._selectionService;
+    if (selection) selection.shouldForceSelection = (e) => e.button === 0;
 
     let disposed = false;
     if (!fontLoaded) {
@@ -436,10 +447,11 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       );
     };
 
+    // Under WKWebView the IME reports composed text in a way xterm ignores;
+    // the bridge fills that in and stands down where composition events fire,
+    // which is every Chromium build. See WEBKIT-IME.md.
     const ime = setupImeInput(term, write);
     const dataSub = term.onData((data) => {
-      // The bridge owns composed text; everything else — ASCII, control
-      // keys, mouse reports — is xterm's and passes straight through.
       const out = ime.route(data);
       if (out) write(out);
     });
