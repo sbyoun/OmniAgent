@@ -171,12 +171,36 @@ export function setupImeInput(term: Terminal, send: (data: string) => void) {
   };
   ta.addEventListener("input", onInput);
 
+  let composing = false;
+
   const onCompositionStart = () => {
     native = true;
+    composing = true;
     sent = "";
     paint();
   };
   ta.addEventListener("compositionstart", onCompositionStart);
+
+  /**
+   * Empty the box once a composition is over.
+   *
+   * Where composition events fire, xterm reads the composed text out of the
+   * textarea a tick after `compositionend` and then leaves it there — so the
+   * box accumulates every syllable ever typed into the pod. Its diff against
+   * that growing value is what starts re-emitting an old tail after a while
+   * (xtermjs/xterm.js#6045): the same character over and over, wherever the
+   * cursor is, until something clears the box. Focusing another window is
+   * what used to do it, since xterm empties the box on blur.
+   */
+  const onCompositionEnd = () => {
+    composing = false;
+    setTimeout(() => {
+      if (composing || !native || !ta.value) return;
+      ta.value = "";
+      sent = "";
+    }, 150);
+  };
+  ta.addEventListener("compositionend", onCompositionEnd);
 
   // Losing focus finalizes whatever was composing, and xterm empties the box
   // on blur — which would take the held character with it. `held` is read
@@ -224,6 +248,7 @@ export function setupImeInput(term: Terminal, send: (data: string) => void) {
     dispose: () => {
       ta.removeEventListener("input", onInput);
       ta.removeEventListener("compositionstart", onCompositionStart);
+      ta.removeEventListener("compositionend", onCompositionEnd);
       ta.removeEventListener("blur", onBlur);
       cursorSub.dispose();
       view?.remove();
