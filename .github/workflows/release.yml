@@ -31,6 +31,9 @@ jobs:
 
       - run: npm ci
 
+      # electron-builder only packages what is already built.
+      - run: npm run build:app
+
       - name: Build and publish
         run: npx electron-builder ${{ matrix.args }} --publish always
         env:
