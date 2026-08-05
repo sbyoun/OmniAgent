@@ -9,8 +9,27 @@ import { setupImeInput } from "../dist-test/ime.mjs";
  */
 function harness() {
   const listeners = {};
+  const created = [];
+  const element = () => ({
+    style: {},
+    textContent: "",
+    classList: {
+      names: new Set(),
+      add(n) {
+        this.names.add(n);
+      },
+      remove(n) {
+        this.names.delete(n);
+      },
+    },
+    remove() {},
+  });
   const ta = {
     value: "",
+    // xterm parks the box on the cursor cell; one fixed cell is enough here.
+    style: { left: "40px", top: "20px", height: "16px", lineHeight: "16px" },
+    parentElement: { appendChild: (n) => created.push(n) },
+    ownerDocument: { createElement: () => element() },
     addEventListener: (t, f) => (listeners[t] = f),
     removeEventListener: () => {},
   };
@@ -18,7 +37,9 @@ function harness() {
   let keyHandler = () => true;
   const term = {
     textarea: ta,
+    options: {},
     attachCustomKeyEventHandler: (h) => (keyHandler = h),
+    onCursorMove: () => ({ dispose: () => {} }),
   };
   const ime = setupImeInput(term, (d) => pty.push(d));
   const route = (data) => {
@@ -39,8 +60,26 @@ function harness() {
       listeners.input({ inputType: "insertFromPaste" });
     },
     xterm: route,
+    /**
+     * Enter and Ctrl-C, in xterm's order: `_keyDown` empties the box before
+     * firing the key, so the held character is gone by the time we see it.
+     */
+    enter: (data = "\r") => {
+      ta.value = "";
+      route(data);
+    },
     compose: () => listeners.compositionstart(),
     key: (k) => keyHandler({ type: "keydown", key: k }),
+    /** xterm empties the box in its own blur handler, which runs first. */
+    blur: () => {
+      ta.value = "";
+      listeners.blur();
+    },
+    /** What the composing view shows, or null when it is hidden. */
+    shown: () =>
+      created[0]?.classList.names.has("active")
+        ? created[0].textContent
+        : null,
   };
 }
 
@@ -66,7 +105,7 @@ const check = (name, got, want) => {
   h.step("한글");
   h.step("한글");
   h.step("한글 ", " "); // xterm's space arrives before the bridge sees 글
-  h.xterm("\r");
+  h.enter();
   check("recorded 한글 trace", h.pty.join(""), "한글 \r");
 }
 
@@ -85,8 +124,17 @@ const check = (name, got, want) => {
   h.step("ㅎ", "ㅎ");
   h.step("한");
   check("tail held while composing", h.pty.join(""), "");
-  h.xterm("\r");
+  h.enter();
   check("Enter commits it first", h.pty.join(""), "한\r");
+}
+
+// 3b. Ctrl-C empties the box the same way, and must not eat the syllable.
+{
+  const h = harness();
+  h.step("ㅎ", "ㅎ");
+  h.step("한");
+  h.enter("\x03");
+  check("Ctrl-C commits it first", h.pty.join(""), "한\x03");
 }
 
 // 4. Paste is not composition: spaces survive and nothing is held back.
@@ -137,17 +185,63 @@ const check = (name, got, want) => {
   check("native IME → Backspace is xterm's", h.key("Backspace"), true);
 }
 
-// 7. Successive lines: each syllable lands once, in order.
+// 7. Successive lines: each syllable lands once, in order. Enter left the box
+//    empty, so the second line starts from nothing.
 {
   const h = harness();
   h.step("ㅎ", "ㅎ");
   h.step("한ㄱ", "ㄱ");
   h.step("한글");
-  h.xterm("\r");
-  h.step("한글ㄱ", "ㄱ");
-  h.step("한글가");
-  h.xterm("\r");
+  h.enter();
+  h.step("ㄱ", "ㄱ");
+  h.step("가");
+  h.enter();
   check("across lines", h.pty.join(""), "한글\r가\r");
+}
+
+// 8. The held syllable is on screen while it waits — nothing else can show
+//    it, since it has not reached the pty and no composition event fires.
+{
+  const h = harness();
+  h.step("ㅎ", "ㅎ");
+  check("jamo shown while composing", h.shown(), "ㅎ");
+  h.step("한");
+  check("view follows the syllable", h.shown(), "한");
+  h.enter();
+  check("committed → view hidden", h.shown(), null);
+  check("and sent once", h.pty.join(""), "한\r");
+}
+
+// 8b. Nothing to hold, nothing to show.
+{
+  const h = harness();
+  h.step("한ㄱ", "ㄱ");
+  h.step("한글 ", " ");
+  check("finalized text is not re-shown", h.shown(), null);
+}
+
+// 8c. Where composition events fire, the view is xterm's to draw.
+{
+  const h = harness();
+  h.compose();
+  h.step("ㅎ", "ㅎ");
+  check("native IME → no view of ours", h.shown(), null);
+}
+
+// 9. Focus leaving finalizes the syllable: xterm empties the box on blur,
+//    which would otherwise take the held character with it.
+{
+  const h = harness();
+  h.step("ㅎ", "ㅎ");
+  h.step("한");
+  h.blur();
+  check("blur commits the held syllable", h.pty.join(""), "한");
+  check("blur hides the view", h.shown(), null);
+  // Back to a clean slate: the next syllable must not resend the last one.
+  h.step("ㄱ", "ㄱ");
+  h.step("가");
+  h.enter();
+  check("no double-send after blur", h.pty.join(""), "한가\r");
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : "\nall checks passed");
