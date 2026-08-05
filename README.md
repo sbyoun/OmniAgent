@@ -64,8 +64,8 @@ packagings, pick per machine:
 
 | | Files | Runtime | Size |
 |---|---|---|---|
-| **Electron** | `OmniAgent-*.dmg` `.AppImage` `.exe` | Chromium | ~120 MB |
-| **Tauri** | `OmniAgent_*.dmg` `.deb` `.msi` | WKWebView, WebView2, WebKitGTK | ~10 MB |
+| **Electron** | `OmniAgent-electron-*` | Chromium | ~120 MB |
+| **Tauri** | `OmniAgent_*` | WKWebView, WebView2, WebKitGTK | ~10 MB |
 
 The Tauri build is a tenth of the size and lighter on memory. The Electron
 build is larger, but on macOS its terminal takes Korean, Japanese and Chinese
