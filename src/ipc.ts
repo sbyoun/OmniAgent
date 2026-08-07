@@ -74,6 +74,15 @@ export const ptyResize = (id: string, rows: number, cols: number) =>
 
 export const ptyKill = (id: string) => backend.call<void>("pty_kill", { id });
 
+/**
+ * Close a pod but leave its tmux session running (⌘/Ctrl+W). Unlike
+ * `ptyKill`, the session is never touched — the work stays put and the pod
+ * reattaches to it next launch. Must be awaited before the panel is removed so
+ * it lands ahead of the teardown's `ptyKill`, which then finds nothing to do.
+ */
+export const ptyDetach = (id: string) =>
+  backend.call<void>("pty_detach", { id });
+
 /** Epoch seconds when the pod's tmux session was created, if it has one. */
 export const tmuxSessionStarted = (host: string | null, session: string) =>
   backend.call<number | null>("tmux_session_started", { host, session });

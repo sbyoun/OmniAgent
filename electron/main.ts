@@ -7,6 +7,7 @@ import {
   listTmuxSessions,
   killAllPtys,
   killPty,
+  detachPty,
   resizePty,
   selectTmuxWindow,
   spawnPty,
@@ -168,6 +169,7 @@ function registerHandlers() {
     resizePty(id, rows, cols),
   );
   ipcMain.on("pty_kill", (_e, id: string) => killPty(id));
+  ipcMain.on("pty_detach", (_e, id: string) => detachPty(id));
   ipcMain.handle("tmux_session_started", (_e, host: string | null, session: string) =>
     tmuxSessionStarted(host, session),
   );

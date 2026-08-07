@@ -5,7 +5,14 @@ import {
   themeDark,
 } from "dockview-react";
 import { useEffect, useRef, useState } from "react";
-import { layoutRead, layoutWrite, listSshHosts, shellName, SshHost } from "./ipc";
+import {
+  layoutRead,
+  layoutWrite,
+  listSshHosts,
+  ptyDetach,
+  shellName,
+  SshHost,
+} from "./ipc";
 import { startWindowDrag } from "./window";
 import { HostStats, subscribeHostStats } from "./hostStats";
 import { setSetting, useSettings } from "./settings";
@@ -18,6 +25,12 @@ const tabComponents = { pod: PodTab };
 const LAYOUT_KEY = "omniagent.layout.v1";
 // Pre-rename key, read once as a fallback so existing layouts migrate.
 const LEGACY_LAYOUT_KEY = "omniterm.layout.v1";
+
+// The modifier that carries the app's own shortcuts: ⌘ on macOS, Ctrl on
+// Windows/Linux. Following each platform's convention is not just polish here —
+// Ctrl+W on macOS is the shell's "delete previous word", so binding pod-close
+// to it would hijack a key people lean on inside the terminal.
+const IS_MAC = navigator.platform.toUpperCase().includes("MAC");
 
 let podCounter = 0;
 
@@ -53,6 +66,48 @@ export default function App() {
       if (e.metaKey && e.shiftKey && e.code === "KeyI") {
         e.preventDefault();
         location.href = new URL("ime-check.html", location.href).href;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // Pod keyboard shortcuts (⌘ on macOS, Ctrl elsewhere):
+  //   • mod+W          — close the active pod, LEAVING its tmux session
+  //                      running. That is the whole difference from the tab's
+  //                      ✕, which kills the session: mod+W detaches, so the
+  //                      work is still there next launch (and still on the
+  //                      server right now, for a remote pod).
+  //   • mod+Shift+[ ]  — step to the previous / next pod and focus it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+      if (!mod || e.altKey) return;
+      const api = apiRef.current;
+      if (!api) return;
+
+      // Close the active pod, keeping its session. Detach on the backend
+      // first, then remove the panel — the teardown's ptyKill then finds the
+      // client already gone and never reaches its kill-session branch.
+      if (!e.shiftKey && e.code === "KeyW") {
+        const active = api.activePanel;
+        if (!active) return;
+        e.preventDefault();
+        void ptyDetach(active.id).then(() => active.api.close());
+        return;
+      }
+
+      // Cycle pods. Match on e.code (the physical bracket keys) because Shift
+      // turns the characters into { and }, and wrap around at both ends.
+      if (e.shiftKey && (e.code === "BracketLeft" || e.code === "BracketRight")) {
+        const panels = api.panels;
+        if (panels.length < 2) return;
+        e.preventDefault();
+        const current = api.activePanel?.id;
+        const i = panels.findIndex((p) => p.id === current);
+        const step = e.code === "BracketRight" ? 1 : -1;
+        const next = panels[(i + step + panels.length) % panels.length];
+        next.api.setActive();
       }
     };
     window.addEventListener("keydown", onKey);

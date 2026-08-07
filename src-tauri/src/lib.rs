@@ -74,6 +74,7 @@ pub fn run() {
             pty::pty_write,
             pty::pty_resize,
             pty::pty_kill,
+            pty::pty_detach,
             pty::tmux_session_started,
             pty::tmux_sessions,
             pty::tmux_kill_session,

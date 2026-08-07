@@ -356,6 +356,22 @@ export function killPty(id: string): void {
 }
 
 /**
+ * Detach a pod — the ⌘/Ctrl+W close. Tears down the client exactly as
+ * `killPty` does (drop the generation first so its `onExit` stays silent, then
+ * kill the process), but never touches the tmux session: the work keeps
+ * running, and the pod reattaches to it on the next launch. The panel teardown
+ * that follows calls `killPty`, which finds nothing left and no-ops — so this
+ * must run first, which the caller guarantees.
+ */
+export function detachPty(id: string): void {
+  const inst = instances.get(id);
+  if (!inst) return;
+  instances.delete(id);
+  generations.delete(id);
+  inst.proc.kill();
+}
+
+/**
  * Kill every pty on the way out — but leave the tmux sessions alone. They are
  * exactly what the next launch restores.
  */

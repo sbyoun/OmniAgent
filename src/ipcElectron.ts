@@ -33,6 +33,7 @@ const ORDER: Record<string, string[]> = {
   pty_write: ["id", "data"],
   pty_resize: ["id", "rows", "cols"],
   pty_kill: ["id"],
+  pty_detach: ["id"],
   tmux_session_started: ["host", "session"],
   fs_list_dir: ["host", "path"],
   fs_read_file: ["host", "path"],

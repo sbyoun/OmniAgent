@@ -45,6 +45,11 @@ class TmuxFriendlyClipboardProvider extends BrowserClipboardProvider {
   }
 }
 
+const IS_MAC = navigator.platform.toUpperCase().includes("MAC");
+
+/** The pod-close shortcut, spelled for whichever platform this build runs on. */
+const CLOSE_SHORTCUT = IS_MAC ? "⌘W" : "Ctrl+W";
+
 export type PodStatus = "connecting" | "running" | "exited";
 export type PodActivity = "working" | "idle" | "attention";
 
@@ -463,7 +468,7 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
           title={
             dropped
               ? "Close pod (the session keeps running on the server)"
-              : "Close pod (kills its session)"
+              : `Close pod (kills its session) — ${CLOSE_SHORTCUT} closes it but keeps the session running`
           }
           onMouseDown={guard}
           onClick={() => props.api.close()}
@@ -521,6 +526,22 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     term.loadAddon(
       new ClipboardAddon(undefined, new TmuxFriendlyClipboardProvider()),
     );
+
+    // The app owns a few modifier combos (handled in App.tsx): mod+W closes the
+    // pod, mod+Shift+[ ] switches pods. Return false for exactly those so xterm
+    // hands the keydown back to the DOM — where the window listener runs them —
+    // instead of forwarding bytes to the shell. Only the platform's real
+    // modifier is reserved, so Ctrl+W on macOS still reaches the shell as its
+    // own delete-word.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown") return true;
+      const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+      if (!mod || e.altKey) return true;
+      if (!e.shiftKey && e.code === "KeyW") return false;
+      if (e.shiftKey && (e.code === "BracketLeft" || e.code === "BracketRight"))
+        return false;
+      return true;
+    });
     // xterm measures the cell grid the moment it opens, and the terminal
     // font is fetched over the network — so a pod that opens first is sized
     // against the fallback font and never re-measured, leaving the rendered

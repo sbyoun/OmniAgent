@@ -454,6 +454,22 @@ pub fn pty_kill(state: State<'_, PtyManager>, id: String) -> Result<(), String> 
     Ok(())
 }
 
+/// Detach a pod — the ⌘/Ctrl+W close. Tears down the client exactly as
+/// `pty_kill` does (drop the generation, kill the child) but never touches the
+/// tmux session: the work keeps running and the pod reattaches to it on the
+/// next launch. The panel teardown that follows sends `pty_kill`, which finds
+/// nothing left and no-ops — so this must land first, which the caller ensures
+/// by awaiting it before closing the panel.
+#[tauri::command]
+pub fn pty_detach(state: State<'_, PtyManager>, id: String) -> Result<(), String> {
+    let mut map = state.ptys.lock().unwrap();
+    state.gens.lock().unwrap().remove(&id);
+    if let Some(mut inst) = map.remove(&id) {
+        let _ = inst.child.kill();
+    }
+    Ok(())
+}
+
 /// End a session from the sessions list, whoever started it.
 #[tauri::command]
 pub async fn tmux_kill_session(host: Option<String>, name: String) {
