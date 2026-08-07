@@ -49,6 +49,13 @@ let fontState: FontMenuState = {
   selected: "default",
 };
 
+/**
+ * Mirror of the renderer's `activePodBorder` setting, kept here for the same
+ * reason as `fontState`: the menu is built before the renderer connects.
+ * Matches the DEFAULTS in src/settings.ts.
+ */
+let podBorder = true;
+
 /** Send to the window the menu belongs to (there is only ever the one). */
 function sendToWindow(channel: string, ...args: unknown[]) {
   const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
@@ -73,6 +80,20 @@ function fontSubmenu(): MenuItemConstructorOptions {
     },
   );
   return { label: "Font", submenu: items };
+}
+
+/**
+ * View → Active Pod Border. Electron flips `checked` itself before the click
+ * handler runs, so the item's own state is the new value to hand the renderer.
+ */
+function podBorderItem(): MenuItemConstructorOptions {
+  return {
+    id: "pods:border",
+    label: "Active Pod Border",
+    type: "checkbox",
+    checked: podBorder,
+    click: (item) => sendToWindow("menu-set-pod-border", item.checked),
+  };
 }
 
 /**
@@ -123,6 +144,7 @@ function buildMenu() {
           { role: "toggleDevTools" },
           { type: "separator" },
           fontSubmenu(),
+          podBorderItem(),
           { type: "separator" },
           { role: "resetZoom" },
           { role: "zoomIn" },
@@ -291,4 +313,13 @@ function registerHandlers() {
       buildMenu();
     },
   );
+
+  // Same projection for the pod-border toggle: the renderer persists it, the
+  // menu only shows it — including the startup push, which corrects the mirror
+  // above for anyone who turned it off in an earlier run.
+  ipcMain.handle("set_pod_border_menu", (_e, enabled: boolean) => {
+    if (podBorder === enabled) return;
+    podBorder = enabled;
+    buildMenu();
+  });
 }

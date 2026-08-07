@@ -198,3 +198,14 @@ export const onMenuSetFont = (cb: (key: string) => void): UnlistenFn =>
 /** The user chose "Add Local Font…" in the native menu. */
 export const onMenuAddFont = (cb: () => void): UnlistenFn =>
   backend.on("menu-add-font", cb);
+
+/**
+ * Mirror the active-pod-border setting onto View → Active Pod Border. Same
+ * arrangement as the font menu: the renderer owns the value, the menu shows it.
+ */
+export const setPodBorderMenu = (enabled: boolean) =>
+  backend.call<void>("set_pod_border_menu", { enabled }).catch(() => {});
+
+/** The user toggled View → Active Pod Border. Payload is the new state. */
+export const onMenuSetPodBorder = (cb: (enabled: boolean) => void): UnlistenFn =>
+  backend.on("menu-set-pod-border", cb);
