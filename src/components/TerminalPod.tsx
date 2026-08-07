@@ -24,7 +24,7 @@ import {
   ptyWrite,
 } from "../ipc";
 import { HostStats, subscribeHostStats } from "../hostStats";
-import { useSettings } from "../settings";
+import { activeFont, primaryFamily, useSettings } from "../settings";
 import { setupImeInput } from "../ime";
 import { Explorer } from "./Explorer";
 import { EditorPanel } from "./EditorPanel";
@@ -483,7 +483,12 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
 export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
   const { host, explorerOpen, editorOpen } = props.params;
   const podId = props.api.id;
+  const settings = useSettings();
   const containerRef = useRef<HTMLDivElement>(null);
+  // Held so the font-change effect below can re-drive a live terminal without
+  // tearing it down — the creation effect must not depend on the font.
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
   const editorPath = props.params.editorPath ?? null;
   const setEditorPath = (path: string | null) =>
     props.api.updateParameters({ editorPath: path ?? undefined });
@@ -511,8 +516,12 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     const el = containerRef.current;
     if (!el) return;
 
+    // Open with whatever font is active right now — a pod created while
+    // D2Coding (or a custom family) is selected must start correct, not flip
+    // to it a frame later. Live changes are handled by a separate effect.
+    const initialMono = activeFont().mono;
     const term = new Terminal({
-      fontFamily: "JetBrains Mono, monospace",
+      fontFamily: initialMono,
       fontSize: 13,
       lineHeight: 1.25,
       cursorBlink: true,
@@ -521,6 +530,8 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    termRef.current = term;
+    fitRef.current = fit;
     // OSC 52 → system clipboard, so tmux copy-mode / mouse-drag copies
     // (set-clipboard on) actually land in the macOS clipboard (#13).
     term.loadAddon(
@@ -543,10 +554,12 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       return true;
     });
     // xterm measures the cell grid the moment it opens, and the terminal
-    // font is fetched over the network — so a pod that opens first is sized
-    // against the fallback font and never re-measured, leaving the rendered
-    // text and the mouse-to-cell mapping on slightly different grids.
-    const fontLoaded = document.fonts.check('13px "JetBrains Mono"');
+    // font is fetched over the network (or, for D2Coding, lazily from the
+    // bundle) — so a pod that opens first is sized against the fallback font
+    // and never re-measured, leaving the rendered text and the mouse-to-cell
+    // mapping on slightly different grids.
+    const initialPrimary = primaryFamily(initialMono);
+    const fontLoaded = document.fonts.check(`13px ${initialPrimary}`);
     term.open(el);
 
     // tmux has to own the mouse for the wheel to scroll its scrollback, but
@@ -562,11 +575,11 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
 
     let disposed = false;
     if (!fontLoaded) {
-      document.fonts.ready.then(() => {
+      document.fonts.load(`13px ${initialPrimary}`).catch(() => {}).then(() => {
         if (disposed) return;
         // Round-trip the family so xterm re-measures with the real font.
         term.options.fontFamily = "monospace";
-        term.options.fontFamily = "JetBrains Mono, monospace";
+        term.options.fontFamily = initialMono;
         fit.fit();
       });
     }
@@ -860,6 +873,8 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     return () => {
       disposed = true;
       reconnectRef.current = null;
+      termRef.current = null;
+      fitRef.current = null;
       window.removeEventListener("keydown", onModKey);
       window.removeEventListener("keyup", onModKey);
       linkSub.dispose();
@@ -876,6 +891,30 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [podId, host]);
+
+  // Live font change (View → Font). Applying it to an open pod must repeat the
+  // measurement dance the initial load uses: swap the family, wait for the new
+  // font to actually be available, then fit() + ptyResize so the drawn grid
+  // and the PTY's rows/cols — and the mouse-to-cell mapping — stay on one grid.
+  useEffect(() => {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
+    const mono = activeFont(settings).mono;
+    if (term.options.fontFamily === mono) return;
+    // Round-trip through a generic so xterm drops its glyph cache and remeasures.
+    term.options.fontFamily = "monospace";
+    term.options.fontFamily = mono;
+    document.fonts
+      .load(`13px ${primaryFamily(mono)}`)
+      .catch(() => {})
+      .then(() => {
+        // The pod may have closed while the font loaded.
+        if (termRef.current !== term) return;
+        fit.fit();
+        ptyResize(podId, term.rows, term.cols).catch(() => {});
+      });
+  }, [settings, podId]);
 
   return (
     <div className="flex flex-col h-full bg-surface-container-low">

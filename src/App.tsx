@@ -9,15 +9,19 @@ import {
   layoutRead,
   layoutWrite,
   listSshHosts,
+  onMenuAddFont,
+  onMenuSetFont,
   ptyDetach,
+  setFontMenu,
   shellName,
   SshHost,
 } from "./ipc";
 import { startWindowDrag } from "./window";
 import { HostStats, subscribeHostStats } from "./hostStats";
-import { setSetting, useSettings } from "./settings";
+import { fontOptions, selectFont, setSetting, useSettings } from "./settings";
 import { PodParams, PodTab, TerminalPod } from "./components/TerminalPod";
 import { Sessions } from "./components/Sessions";
+import { FontManager } from "./components/FontManager";
 
 const components = { terminal: TerminalPod };
 const tabComponents = { pod: PodTab };
@@ -52,6 +56,7 @@ export default function App() {
     total: 0,
   });
   const apiRef = useRef<DockviewApi | null>(null);
+  const [fontManagerOpen, setFontManagerOpen] = useState(false);
 
   useEffect(() => {
     listSshHosts().then(setHosts).catch(console.error);
@@ -124,6 +129,29 @@ export default function App() {
     }
     return subscribeHostStats(null, setLocalStats);
   }, [settings.meters]);
+
+  // The native Font menu (View → Font) is the entry point for the font
+  // feature. Selecting an item applies it; "Add Local Font…" opens the manager.
+  useEffect(() => {
+    const offSet = onMenuSetFont((key) => selectFont(key));
+    const offAdd = onMenuAddFont(() => setFontManagerOpen(true));
+    return () => {
+      offSet();
+      offAdd();
+    };
+  }, []);
+
+  // Keep the native menu in step with the renderer's font state — it owns the
+  // list and the selection, so any change (add / remove / pick) is re-projected.
+  useEffect(() => {
+    setFontMenu(
+      fontOptions(settings.customFonts).map((o) => ({
+        key: o.key,
+        label: o.label,
+      })),
+      settings.font,
+    );
+  }, [settings.font, settings.customFonts]);
 
   // Fleet health summary: poll pod activity params (cheap — a handful of
   // pods) so the header always shows who is working and who is stuck.
@@ -560,6 +588,9 @@ export default function App() {
         </footer>
       </div>
       </div>
+      {fontManagerOpen && (
+        <FontManager onClose={() => setFontManagerOpen(false)} />
+      )}
     </div>
   );
 }

@@ -2,6 +2,32 @@
 @import "dockview-react/dist/styles/dockview.css";
 @import "@xterm/xterm/css/xterm.css";
 
+/*
+ * D2Coding — an optional whole-app font (View → Font), bundled so it works
+ * offline in both the Electron and Tauri builds. The files live in src/ (not
+ * public/) on purpose: Vite hashes them and rewrites these url()s relative to
+ * the emitted CSS, which is what makes them resolve under Electron's file://
+ * load (base: "./"). font-display: swap keeps the terminal's cell measurement
+ * from blocking on the ~1.5 MB download — the pods re-measure once the font
+ * lands, the same dance the JetBrains Mono load already uses. The font is only
+ * fetched when something actually renders in it, so the default choice never
+ * pays for it. Weight ranges map the UI's 500/600/700 onto the two real cuts.
+ */
+@font-face {
+  font-family: "D2Coding";
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url("./fonts/d2coding-full.woff2") format("woff2");
+}
+@font-face {
+  font-family: "D2Coding";
+  font-style: normal;
+  font-weight: 600 900;
+  font-display: swap;
+  src: url("./fonts/d2coding-bold-full.woff2") format("woff2");
+}
+
 /* Design tokens from docs/design.md (Stitch: Agentic Server Control Tower) */
 @theme {
   --color-primary: #95ccff;

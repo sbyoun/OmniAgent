@@ -1,4 +1,11 @@
-import { app, BrowserWindow, Menu, ipcMain, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  type MenuItemConstructorOptions,
+  ipcMain,
+  shell,
+} from "electron";
 import { join } from "node:path";
 import * as files from "./files";
 import {
@@ -22,6 +29,51 @@ const devUrl = process.env.VITE_DEV_SERVER_URL;
 // A dev run has no bundle to read the name from, so the menu bar would say
 // "Electron". Set it before anything builds a menu.
 app.setName("OmniAgent");
+
+/**
+ * The renderer owns the font list and the active choice (they live in its
+ * localStorage); the native menu is only a projection. This mirror is kept so
+ * the menu can be built at startup — before the renderer has connected — and
+ * rebuilt in place whenever the renderer pushes a change through
+ * `set_font_menu`. The two built-ins match `fontOptions()` in src/settings.ts.
+ */
+interface FontMenuState {
+  options: { key: string; label: string }[];
+  selected: string;
+}
+let fontState: FontMenuState = {
+  options: [
+    { key: "default", label: "Default · Inter / JetBrains Mono" },
+    { key: "d2coding", label: "D2Coding" },
+  ],
+  selected: "default",
+};
+
+/** Send to the window the menu belongs to (there is only ever the one). */
+function sendToWindow(channel: string, ...args: unknown[]) {
+  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  win?.webContents.send(channel, ...args);
+}
+
+/** View → Font, rebuilt from `fontState` each time the menu is (re)built. */
+function fontSubmenu(): MenuItemConstructorOptions {
+  const items: MenuItemConstructorOptions[] = fontState.options.map((o) => ({
+    id: `font:${o.key}`,
+    label: o.label,
+    type: "radio",
+    checked: o.key === fontState.selected,
+    click: () => sendToWindow("menu-set-font", o.key),
+  }));
+  items.push(
+    { type: "separator" },
+    {
+      id: "font:add",
+      label: "Add Local Font…",
+      click: () => sendToWindow("menu-add-font"),
+    },
+  );
+  return { label: "Font", submenu: items };
+}
 
 /**
  * The macOS application menu. Without one, Electron installs a default menu
@@ -69,6 +121,8 @@ function buildMenu() {
         submenu: [
           { role: "reload" },
           { role: "toggleDevTools" },
+          { type: "separator" },
+          fontSubmenu(),
           { type: "separator" },
           { role: "resetZoom" },
           { role: "zoomIn" },
@@ -227,4 +281,14 @@ function registerHandlers() {
   );
   ipcMain.handle("layout_read", () => files.readLayout());
   ipcMain.handle("layout_write", (_e, content: string) => files.writeLayout(content));
+
+  // The renderer pushes its font list + selection; rebuild the menu so View →
+  // Font reflects the custom families it has and marks the active one.
+  ipcMain.handle(
+    "set_font_menu",
+    (_e, options: FontMenuState["options"], selected: string) => {
+      fontState = { options, selected };
+      buildMenu();
+    },
+  );
 }

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { fsDownload, fsReadBase64, fsReadFile, fsWriteFile } from "../ipc";
+import { activeFont, primaryFamily, useSettings } from "../settings";
 
 interface Props {
   host: string | null;
@@ -25,6 +26,9 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
   const valueRef = useRef("");
   const saveRef = useRef<() => void>(() => {});
   const previewRef = useRef<HTMLDivElement>(null);
+  const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
+  const settings = useSettings();
+  const editorFont = activeFont(settings).mono;
 
   const isMarkdown = !!path && /\.(md|markdown|mdx)$/i.test(path);
   const imageType = path ? imageMime(path) : null;
@@ -113,10 +117,21 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
   };
 
   const onMount: OnMount = (editor, monaco) => {
+    monacoRef.current = monaco;
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () =>
       saveRef.current(),
     );
   };
+
+  // Monaco caches glyph widths, so a font change (View → Font) needs an
+  // explicit remeasure once the new family is actually loaded — otherwise the
+  // caret and the text sit on different metrics until the next relayout.
+  useEffect(() => {
+    document.fonts
+      .load(`13px ${primaryFamily(editorFont)}`)
+      .catch(() => {})
+      .then(() => monacoRef.current?.editor.remeasureFonts());
+  }, [editorFont]);
 
   const language = path ? guessLanguage(path) : "plaintext";
 
@@ -237,7 +252,7 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
             }}
             options={{
               fontSize: 13,
-              fontFamily: "JetBrains Mono, monospace",
+              fontFamily: editorFont,
               minimap: { enabled: false },
               scrollBeyondLastLine: false,
               automaticLayout: true,

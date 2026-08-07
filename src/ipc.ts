@@ -175,3 +175,26 @@ export const onPtyOutput = async (
 export const onPtyExit = async (
   cb: (payload: { id: string }) => void,
 ): Promise<UnlistenFn> => backend.on("pty-exit", cb);
+
+/** One entry the native Font menu (View → Font) should list. */
+export interface FontMenuOption {
+  key: string;
+  label: string;
+}
+
+/**
+ * Rebuild the native Font menu to mirror the renderer's font state — the
+ * renderer owns the list and the selection (it lives in localStorage), so the
+ * menu is only a projection of it. Called on startup and after every change.
+ * Best-effort: a shell without a native menu simply ignores the call.
+ */
+export const setFontMenu = (options: FontMenuOption[], selected: string) =>
+  backend.call<void>("set_font_menu", { options, selected }).catch(() => {});
+
+/** The user picked a font in the native menu. Payload is the option's key. */
+export const onMenuSetFont = (cb: (key: string) => void): UnlistenFn =>
+  backend.on("menu-set-font", cb);
+
+/** The user chose "Add Local Font…" in the native menu. */
+export const onMenuAddFont = (cb: () => void): UnlistenFn =>
+  backend.on("menu-add-font", cb);

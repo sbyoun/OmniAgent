@@ -51,6 +51,7 @@ const ORDER: Record<string, string[]> = {
   tmux_kill_session: ["host", "name"],
   tmux_rename_session: ["host", "from", "to"],
   tmux_select_window: ["host", "session", "index"],
+  set_font_menu: ["options", "selected"],
 };
 
 function positional(command: string, args?: Record<string, unknown>): unknown[] {
