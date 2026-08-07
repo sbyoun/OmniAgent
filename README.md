@@ -107,6 +107,7 @@ npm run dev:electron   # …the Electron app in another
 npm run tauri dev      # or the Tauri app instead
 
 npm run package        # Electron bundle, signed and notarized
+npm run package:local  # …the same bundle unsigned, to test on this machine
 npm run tauri build    # Tauri bundle
 ```
 
