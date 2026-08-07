@@ -241,7 +241,8 @@ export async function homeDir(host: string | null): Promise<string> {
 /**
  * CPU load and memory use for a pod's machine. One portable snippet covers
  * macOS (top/vm_stat) and Linux (/proc), so the same call works for local and
- * ssh pods.
+ * ssh pods. Used memory leaves out cached files: on macOS that is Activity
+ * Monitor's "Memory Used" (app + wired + compressed), on Linux MemAvailable.
  */
 const STATS_SNIPPET = `ID=$(cat /etc/machine-id 2>/dev/null)
 [ -z "$ID" ] && ID=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')
@@ -250,8 +251,8 @@ echo "$ID"
 if [ "$(uname)" = "Darwin" ]; then
 C=$(top -l 2 -n 0 -s 0 2>/dev/null | awk '/^CPU usage/{u=$3;s=$5} END{gsub("%","",u);gsub("%","",s);print u+s}')
 T=$(( $(sysctl -n hw.memsize) / 1048576 ))
-F=$(vm_stat | awk '/Pages free|Pages inactive|Pages speculative/{gsub("\\.","",$NF); s+=$NF} END{print int(s*4096/1048576)}')
-echo "$C $((T-F)) $T"
+U=$(vm_stat | awk -F'[^0-9]+' '/page size of/{ps=$2} /^Pages active/{act=$2} /^Pages wired down/{w=$2} /^Pages purgeable/{p=$2} /^Anonymous pages/{a=$2} /^Pages occupied by compressor/{c=$2} END{if(ps==0)ps=4096; u=w+c+a-p; if(u<=0)u=w+c+act; print int(u*ps/1048576)}')
+echo "$C $U $T"
 else
 read _ a b c d e f g rest < /proc/stat; i1=$((d+e)); t1=$((a+b+c+d+e+f+g))
 sleep 0.25
