@@ -16,9 +16,20 @@ export interface Settings {
   font: string;
   /** Local font families the user added by name, in the order they added them. */
   customFonts: string[];
+  /**
+   * Ring the focused pod once more than one is open (View → Active Pod
+   * Border). Off for anyone who finds the frame noisy — the active pod's
+   * header keeps its accent either way.
+   */
+  activePodBorder: boolean;
 }
 
-const DEFAULTS: Settings = { meters: true, font: "default", customFonts: [] };
+const DEFAULTS: Settings = {
+  meters: true,
+  font: "default",
+  customFonts: [],
+  activePodBorder: true,
+};
 
 /**
  * One selectable entry in View → Font. `ui` and `mono` are the family stacks

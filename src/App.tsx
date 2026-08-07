@@ -11,8 +11,10 @@ import {
   listSshHosts,
   onMenuAddFont,
   onMenuSetFont,
+  onMenuSetPodBorder,
   ptyDetach,
   setFontMenu,
+  setPodBorderMenu,
   shellName,
   SshHost,
 } from "./ipc";
@@ -135,9 +137,11 @@ export default function App() {
   useEffect(() => {
     const offSet = onMenuSetFont((key) => selectFont(key));
     const offAdd = onMenuAddFont(() => setFontManagerOpen(true));
+    const offBorder = onMenuSetPodBorder((on) => setSetting("activePodBorder", on));
     return () => {
       offSet();
       offAdd();
+      offBorder();
     };
   }, []);
 
@@ -152,6 +156,12 @@ export default function App() {
       settings.font,
     );
   }, [settings.font, settings.customFonts]);
+
+  // Likewise for the pod-border checkbox, including the first run — the menu
+  // is built before the renderer connects, so this is what corrects it.
+  useEffect(() => {
+    setPodBorderMenu(settings.activePodBorder);
+  }, [settings.activePodBorder]);
 
   // Fleet health summary: poll pod activity params (cheap — a handful of
   // pods) so the header always shows who is working and who is stuck.
@@ -472,8 +482,15 @@ export default function App() {
             </aside>
           )}
 
-          {/* Pod grid */}
-          <main className="flex-1 min-w-0 bg-surface relative">
+          {/* Pod grid. `pods-multi` turns on the focus ring drawn around the
+              active pod (index.css) — with one pod there is nothing to tell
+              apart, so the ring only appears once a second one opens, and only
+              while View → Active Pod Border is on. */}
+          <main
+            className={`flex-1 min-w-0 bg-surface relative ${
+              podCount > 1 && settings.activePodBorder ? "pods-multi" : ""
+            }`}
+          >
             {podCount === 0 && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-outline z-10 pointer-events-none">
                 <span className="material-symbols-outlined text-[48px]">
