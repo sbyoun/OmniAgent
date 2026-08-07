@@ -13,6 +13,7 @@ import {
   fsHomeDir,
   fsStat,
   tmuxRenameSession,
+  tmuxSessions,
   tmuxSessionStarted,
   onPtyExit,
   onPtyOutput,
@@ -88,6 +89,12 @@ export interface PodParams {
    * leaves the session alone when it closes, and never renames it.
    */
   guest?: boolean;
+  /**
+   * The pod lost its connection while the session kept running. Distinct from
+   * a session that ended: the work is still there, and the pod can go back to
+   * it. Shown on the tab so a small pod still says so.
+   */
+  dropped?: boolean;
   /** What the user called this pod, if anything. */
   name?: string;
   /** Pane sizes, dragged by the splitters. */
@@ -210,6 +217,7 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
     status = "connecting",
     activity = "idle",
     startedAt,
+    dropped,
     explorerOpen,
     editorOpen,
   } = props.params;
@@ -242,7 +250,11 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
 
   const dotClass =
     status === "exited"
-      ? "bg-error"
+      ? // A lost connection is recoverable and an ended session is not, so
+        // they do not get to look the same.
+        dropped
+        ? "bg-[#ffb960]"
+        : "bg-error"
       : status === "connecting"
         ? "bg-tertiary animate-pulse"
         : activity === "attention"
@@ -320,9 +332,15 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
           </span>
         )}
         {status === "running" && <Meters stats={stats} />}
-        <span className="font-mono text-on-surface-variant text-[11px]">
+        <span
+          className={`font-mono text-[11px] ${
+            dropped ? "text-[#ffb960]" : "text-on-surface-variant"
+          }`}
+        >
           {status === "exited"
-            ? "ENDED"
+            ? dropped
+              ? "LOST"
+              : "ENDED"
             : startedAt
               ? `UP ${formatUptime(Date.now() - startedAt)}`
               : "…"}
@@ -365,7 +383,11 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
         </span>
         <span
           className="material-symbols-outlined text-[16px] cursor-pointer text-on-surface-variant hover:text-error"
-          title="Close pod (kills its session)"
+          title={
+            dropped
+              ? "Close pod (the session keeps running on the server)"
+              : "Close pod (kills its session)"
+          }
           onMouseDown={guard}
           onClick={() => props.api.close()}
         >
@@ -395,6 +417,13 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
   } | null>(null);
   const explorerCwdRef = useRef<string | null>(null);
   const homeRef = useRef<string | null>(null);
+  /**
+   * Set when the client died with its session still running — `alive` when the
+   * server said so, `unreachable` when nothing answered. Null while connected.
+   */
+  const [dropped, setDropped] = useState<"alive" | "unreachable" | null>(null);
+  /** Re-attaches this pod. Owned by the terminal effect, called by the banner. */
+  const reconnectRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -445,7 +474,9 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     }
     const unlisteners: Array<() => void> = [];
 
-    const spawnedAt = Date.now();
+    // Reset on every connect, so the "died instantly" rule below judges the
+    // latest attempt rather than the pod's whole life.
+    let spawnedAt = Date.now();
 
     // ---- Agent activity detection (#2): working / idle / needs-input ----
     let activity: PodActivity = "idle";
@@ -485,39 +516,109 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       }
     };
 
+    // Every pod runs inside its OWN named tmux session (stable per pod id),
+    // local or remote — so opening the same server twice gives two independent
+    // sessions, and each pod restores its own content when the app is
+    // reopened. The name is stable for the pod's whole life, which is what
+    // lets a reconnect land back on the same work.
+    const session = props.params.session ?? `omniagent-${podId}`;
+    const ownsSession = !props.params.guest;
+
+    /**
+     * Attach a client to `session` — the first connection and every reconnect
+     * after it. The pod id does not change, so the backend supersedes the dead
+     * client and the listeners below keep feeding this same terminal.
+     */
+    const connect = async () => {
+      setDropped(null);
+      props.api.updateParameters({ status: "connecting", dropped: false });
+      spawnedAt = Date.now();
+      try {
+        await ptySpawn(podId, host, session, term.rows, term.cols, ownsSession);
+      } catch (e) {
+        if (disposed) return;
+        term.writeln(`\r\n\x1b[31m[OmniAgent] spawn failed: ${e}\x1b[0m`);
+        props.api.updateParameters({ status: "exited", dropped: true });
+        setDropped("unreachable");
+        return;
+      }
+      if (disposed) return;
+      props.api.updateParameters({ status: "running" });
+      // Uptime counts the tmux session's life, which survives app restarts —
+      // not when this pod happened to be opened.
+      tmuxSessionStarted(host, session)
+        .then((epoch) => {
+          if (!disposed) {
+            props.api.updateParameters({
+              startedAt: epoch ? epoch * 1000 : Date.now(),
+            });
+          }
+        })
+        .catch(() => {
+          if (!disposed) props.api.updateParameters({ startedAt: Date.now() });
+        });
+    };
+    reconnectRef.current = () => void connect();
+
+    /**
+     * Whether the work behind this pod is still there.
+     *
+     * A client exiting is two very different events wearing one face: the
+     * session ended (an `exit`, someone killed it), or the connection to it
+     * broke. Only the server can tell them apart. `tmux_sessions` answers with
+     * the machine's id alongside its sessions, and that is what makes the
+     * third answer possible — an empty machine id means nothing answered at
+     * all. This probe rides the same network that just failed, so "no answer"
+     * must never be read as "no session".
+     */
+    const sessionState = async (): Promise<"alive" | "gone" | "unreachable"> => {
+      const list = await tmuxSessions(host).catch(() => ({
+        machine: "",
+        sessions: [],
+      }));
+      if (!list.machine) return "unreachable";
+      return list.sessions.some((s) => s.name === session) ? "alive" : "gone";
+    };
+
+    const onClientGone = async () => {
+      if (disposed) return;
+      // Measured before the probe: a round trip to a sick host can take
+      // seconds, and that must not make a pod that failed instantly look like
+      // one that ran for a while.
+      const livedFor = Date.now() - spawnedAt;
+      const state = await sessionState();
+      if (disposed) return;
+      if (state === "gone") {
+        // The session really is over — close the pod as before. Sessions that
+        // die within 5s likely failed to connect, so keep those open with the
+        // error output still readable.
+        if (livedFor > 5000) {
+          props.api.close();
+        } else {
+          props.api.updateParameters({ status: "exited" });
+          term.writeln("\r\n\x1b[90m[OmniAgent] session ended\x1b[0m");
+        }
+        return;
+      }
+      // The work is still running; only the pipe to it broke. Closing the pod
+      // now would strand the session — nothing would name it again — so keep
+      // the pod and offer the way back.
+      props.api.updateParameters({ status: "exited", dropped: true });
+      setDropped(state);
+      term.writeln(
+        state === "alive"
+          ? "\r\n\x1b[33m[OmniAgent] connection lost — the session is still running on the server\x1b[0m"
+          : "\r\n\x1b[33m[OmniAgent] connection lost — the host is not answering\x1b[0m",
+      );
+    };
+
     // Fit after first layout, then spawn the PTY at the fitted size.
     requestAnimationFrame(async () => {
       if (disposed) return;
       fit.fit();
-      try {
-        // Every pod runs inside its OWN named tmux session (stable per pod
-        // id), local or remote — so opening the same server twice gives two
-        // independent sessions, and each pod restores its own content when
-        // the app is reopened.
-        const session = props.params.session ?? `omniagent-${podId}`;
-        await ptySpawn(podId, host, session, term.rows, term.cols, !props.params.guest);
-        if (!disposed) {
-          props.api.updateParameters({ status: "running" });
-          // Uptime counts the tmux session's life, which survives app
-          // restarts — not when this pod happened to be opened.
-          tmuxSessionStarted(host, session)
-            .then((epoch) => {
-              if (!disposed) {
-                props.api.updateParameters({
-                  startedAt: epoch ? epoch * 1000 : Date.now(),
-                });
-              }
-            })
-            .catch(() => {
-              if (!disposed) props.api.updateParameters({ startedAt: Date.now() });
-            });
-        }
-      } catch (e) {
-        term.writeln(`\x1b[31m[OmniAgent] spawn failed: ${e}\x1b[0m`);
-        props.api.updateParameters({ status: "exited" });
-        return;
-      }
-
+      // Subscribe BEFORE connecting: these listeners are keyed by pod id and
+      // outlive any single client, so every reconnect reuses them — and no
+      // output can slip past between the spawn and the subscription.
       unlisteners.push(
         await onPtyOutput(({ id, data }) => {
           if (id !== podId) return;
@@ -528,17 +629,11 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       unlisteners.push(
         await onPtyExit(({ id }) => {
           if (id !== podId) return;
-          // Auto-close the pod when the session ends (`exit`, ssh disconnect).
-          // Sessions that die within 5s likely failed to connect — keep those
-          // open so the error output stays readable.
-          if (Date.now() - spawnedAt > 5000) {
-            props.api.close();
-          } else {
-            props.api.updateParameters({ status: "exited" });
-            term.writeln("\r\n\x1b[90m[OmniAgent] session ended\x1b[0m");
-          }
+          void onClientGone();
         }),
       );
+      if (disposed) return;
+      await connect();
     });
 
     // Serialize ALL pty writes through one promise chain: xterm's own
@@ -644,6 +739,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
 
     return () => {
       disposed = true;
+      reconnectRef.current = null;
       window.removeEventListener("keydown", onModKey);
       window.removeEventListener("keyup", onModKey);
       linkSub.dispose();
@@ -709,6 +805,26 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
                 onDone={() => props.api.updateParameters({ editorHeight })}
               />
             </>
+          )}
+          {/* The terminal below still holds everything the session printed, so
+              the banner sits above it rather than covering it. */}
+          {dropped && (
+            <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 border-y border-[#ffb960]/30 bg-[#ffb960]/10 text-[11px]">
+              <span className="material-symbols-outlined text-[15px] text-[#ffb960] shrink-0">
+                link_off
+              </span>
+              <span className="min-w-0 truncate text-on-surface-variant">
+                {dropped === "alive"
+                  ? "Connection lost — the tmux session is still running on the server."
+                  : "Connection lost — the host is not answering. The session is untouched."}
+              </span>
+              <button
+                onClick={() => reconnectRef.current?.()}
+                className="ml-auto shrink-0 px-2 py-0.5 rounded bg-primary text-on-primary font-medium hover:opacity-90"
+              >
+                Reconnect
+              </button>
+            </div>
           )}
           <div className="flex-1 min-h-0 bg-surface-container-lowest p-1">
             <div ref={containerRef} className="h-full w-full" />

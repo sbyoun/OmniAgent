@@ -10,7 +10,8 @@ interface Instance {
   /**
    * Name of the tmux session backing this pod. Killed when the pod is
    * explicitly closed so sessions don't accumulate; preserved on app quit so
-   * the pod can restore.
+   * the pod can restore. Cleared the moment the client exits on its own, so a
+   * connection that merely dropped can never take the session down with it.
    */
   session: string | null;
   /**
@@ -191,7 +192,18 @@ export function spawnPty(
     sender.send("pty-output", { id, data });
   });
   proc.onExit(() => {
-    if (!isCurrent() || sender.isDestroyed()) return;
+    // Superseded instances stop here: the map already holds their successor,
+    // and clearing its session would disarm the wrong pod.
+    if (!isCurrent()) return;
+    // The client died on its own — a dropped ssh connection, a killed tmux
+    // client, a `exit` typed into the shell. Whichever it was, this instance
+    // has no claim on the tmux session any more: the session outlives the
+    // connection, and the pod close that may follow must not be able to reach
+    // the kill-session branch below. Only a still-live client counts as an
+    // explicit close.
+    const inst = instances.get(id);
+    if (inst) inst.session = null;
+    if (sender.isDestroyed()) return;
     sender.send("pty-exit", { id });
   });
 
@@ -252,6 +264,11 @@ export function killTmuxSession(host: string | null, name: string): Promise<void
 /**
  * Explicit close: tear down the pod's backing tmux session too, so sessions
  * don't pile up. Detached so a slow ssh round-trip never blocks closing.
+ *
+ * "Explicit" means a client that was still alive when the pod closed. One that
+ * had already exited cleared its session on the way out (see `onExit`), so a
+ * dropped connection — and the pod teardown that follows it — leaves the work
+ * on the server running.
  */
 export function killPty(id: string): void {
   const inst = instances.get(id);

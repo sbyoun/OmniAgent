@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 pub struct PtyInstance {
     master: Box<dyn MasterPty + Send>,
@@ -14,7 +14,9 @@ pub struct PtyInstance {
     host: Option<String>,
     /// Name of the tmux session backing this pod (local or remote). Killed
     /// when the pod is explicitly closed so sessions don't accumulate;
-    /// preserved on app quit so the pod can restore.
+    /// preserved on app quit so the pod can restore. Cleared the moment the
+    /// client exits on its own, so a connection that merely dropped can never
+    /// take the session down with it.
     tmux_session: Option<String>,
     /// Whether this pod created its session. A pod opened onto a session that
     /// was already running — from the sessions list — is a guest: closing the
@@ -284,8 +286,23 @@ pub fn pty_spawn(
                     }
                 }
             }
-            // Only the current generation may report the pod as exited.
+            // Only the current generation may report the pod as exited — a
+            // superseded instance would otherwise disarm its own successor.
             if is_current(&reader_id) {
+                // The client died on its own — a dropped ssh connection, a
+                // killed tmux client, an `exit` typed into the shell.
+                // Whichever it was, this instance has no claim on the tmux
+                // session any more: the session outlives the connection, and
+                // the pod close that may follow must not be able to reach the
+                // kill-session branch in `pty_kill`. Only a still-live client
+                // counts as an explicit close.
+                if let Some(mgr) = reader_app.try_state::<PtyManager>() {
+                    if let Ok(mut map) = mgr.ptys.lock() {
+                        if let Some(inst) = map.get_mut(&reader_id) {
+                            inst.tmux_session = None;
+                        }
+                    }
+                }
                 let _ = reader_app.emit("pty-exit", PtyExit { id: reader_id });
             }
         });
@@ -385,7 +402,9 @@ pub fn pty_kill(state: State<'_, PtyManager>, id: String) -> Result<(), String> 
         let _ = inst.child.kill();
         // Explicit close: tear down the pod's backing tmux session too
         // (local or remote). Done on a thread so a slow ssh round-trip
-        // never blocks closing the pod.
+        // never blocks closing the pod. A client that had already exited
+        // cleared `tmux_session` on the way out, so a dropped connection —
+        // and the pod teardown that follows it — leaves the work running.
         if let Some(name) = inst.tmux_session.filter(|_| inst.owns_session) {
             let host = inst.host;
             std::thread::spawn(move || match host {
