@@ -117,6 +117,26 @@ struct PtyExit {
     id: String,
 }
 
+/// The pod's window list, published as the terminal title.
+///
+/// tmux rewrites the title whenever the window set or the active window
+/// changes, so the pod header tracks `Ctrl+B c` / `Ctrl+B <n>` with no polling
+/// at all. That is what makes this affordable for REMOTE pods: a
+/// `tmux list-windows` poll would mean a fresh `ssh` every few seconds per pod,
+/// while the title rides the pty stream that is already open.
+///
+/// `#{W:<inactive>,<active>}` loops the session's windows, emitting the second
+/// form for the current one — so the active window arrives marked with `*`.
+/// Names are cut to 12 chars and stripped of the `|` record separator; the
+/// class in `s/[|]/ /` is deliberate, since a bare `|` there reads as regex
+/// alternation and matches nothing. The `oa:` sentinel keeps titles set by the
+/// shell or a full-screen app (the no-tmux fallback below) from being parsed
+/// as windows.
+///
+/// Kept out of the `format!` strings below on purpose: every `{` here would
+/// otherwise have to be doubled.
+const TITLE_FORMAT: &str = "oa:#{W:#{window_index}:#{=12:#{s/[|]/ /:window_name}}|,#{window_index}*:#{=12:#{s/[|]/ /:window_name}}|}";
+
 /// Spawn a PTY. `host: None` opens the local login shell; `Some(host)` runs
 /// `ssh -t <host>` attaching to (or creating) a tmux session per the SDD.
 /// For local pods, `session: Some(name)` wraps the shell in a named tmux
@@ -168,9 +188,10 @@ pub fn pty_spawn(
                     // was started with — and a server left over from a
                     // non-UTF-8 launch breaks multibyte (Hangul) input while
                     // the rest of the app looks fine.
-                    "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG en_US.UTF-8 \\; set-environment -g LC_CTYPE en_US.UTF-8 \\; new-session -A -s '{}' -e LANG=en_US.UTF-8 -e LC_CTYPE=en_US.UTF-8 \\; set-option status off \\; set-option mouse on 2>/dev/null || tmux -u new-session -A -s '{}' 2>/dev/null || exec $SHELL -l",
+                    "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG en_US.UTF-8 \\; set-environment -g LC_CTYPE en_US.UTF-8 \\; new-session -A -s '{}' -e LANG=en_US.UTF-8 -e LC_CTYPE=en_US.UTF-8 \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || tmux -u new-session -A -s '{}' 2>/dev/null || exec $SHELL -l",
                     name.replace('\'', ""),
-                    name.replace('\'', "")
+                    name.replace('\'', ""),
+                    title = TITLE_FORMAT
                 ),
                 None => "exec $SHELL -l".to_string(),
             };
@@ -190,10 +211,11 @@ pub fn pty_spawn(
                         "-l",
                         "-c",
                         &format!(
-                            "command -v tmux >/dev/null 2>&1 && exec tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG {lang} \\; set-environment -g LC_CTYPE {lang} \\; new-session -A -s '{}' -e LANG={lang} -e LC_CTYPE={lang} \\; set-option status off \\; set-option mouse on || exec \"{}\" -l",
+                            "command -v tmux >/dev/null 2>&1 && exec tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG {lang} \\; set-environment -g LC_CTYPE {lang} \\; new-session -A -s '{}' -e LANG={lang} -e LC_CTYPE={lang} \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' || exec \"{}\" -l",
                             name.replace('\'', ""),
                             shell,
-                            lang = &lang
+                            lang = &lang,
+                            title = TITLE_FORMAT
                         ),
                     ]);
                 }
@@ -436,6 +458,42 @@ pub fn pty_kill(state: State<'_, PtyManager>, id: String) -> Result<(), String> 
 #[tauri::command]
 pub async fn tmux_kill_session(host: Option<String>, name: String) {
     let command = format!("tmux kill-session -t '{}'", name.replace('\'', ""));
+    let _ = match host {
+        None => std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .env(
+                "PATH",
+                format!(
+                    "{}:/opt/homebrew/bin:/usr/local/bin",
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output(),
+        Some(h) => std::process::Command::new("ssh")
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
+            .arg(&command)
+            .output(),
+    };
+}
+
+/// Switch the session to one of its windows — what clicking a window in the pod
+/// header does.
+///
+/// Deliberately NOT typed into the pty as `<prefix> <n>`. That looks simpler and
+/// works for single digits, but tmux only binds the digit keys 0-9, and driving
+/// its command prompt instead (`<prefix> : select-window …`) turns out not to
+/// work at all through a pty write. Walking there with `next-window` does work,
+/// but only when the keystrokes are spaced out — sent as one burst tmux acts on
+/// just the first. Asking the server directly sidesteps all of it, and works the
+/// same for a guest pod whose owner rebound the prefix.
+#[tauri::command]
+pub async fn tmux_select_window(host: Option<String>, session: String, index: i64) {
+    let command = format!(
+        "tmux select-window -t '{}:{}'",
+        session.replace('\'', ""),
+        index
+    );
     let _ = match host {
         None => std::process::Command::new("sh")
             .arg("-c")

@@ -104,6 +104,29 @@ const lang = /utf-?8/i.test(process.env.LANG ?? "")
 const quote = (s: string) => s.replace(/'/g, "");
 
 /**
+ * The pod's window list, published as the terminal title.
+ *
+ * tmux rewrites the title whenever the window set or the active window changes,
+ * so the pod header tracks `Ctrl+B c` / `Ctrl+B <n>` with no polling at all.
+ * That is what makes this affordable for REMOTE pods: a `tmux list-windows`
+ * poll would mean a fresh `ssh` every few seconds per pod, while the title
+ * rides the pty stream that is already open.
+ *
+ * `#{W:<inactive>,<active>}` loops the session's windows, emitting the second
+ * form for the current one — so the active window arrives marked with `*`
+ * rather than having to be looked up separately. Names are cut to 12 chars and
+ * stripped of the `|` record separator; the class in `s/[|]/ /` is deliberate,
+ * since a bare `|` there reads as regex alternation and matches nothing.
+ *
+ * The `oa:` sentinel matters: without tmux (the fallback path below) the shell
+ * and full-screen apps set titles of their own, and those must not be parsed
+ * as windows.
+ */
+const TITLE_FORMAT =
+  "oa:#{W:#{window_index}:#{=12:#{s/[|]/ /:window_name}}|," +
+  "#{window_index}*:#{=12:#{s/[|]/ /:window_name}}|}";
+
+/**
  * Attach-or-create the pod's own tmux session.
  *
  * Each pod gets its OWN named session — opening a host twice must create two
@@ -111,9 +134,13 @@ const quote = (s: string) => s.replace(/'/g, "");
  * itself: without it the shell inherits whatever environment the tmux *server*
  * was started with, and a server left over from a non-UTF-8 launch breaks
  * multibyte input while the rest of the app looks fine. `status off` hides
- * tmux's own bar (the pod header already shows connection state), `mouse on`
- * makes the wheel scroll tmux's scrollback instead of shell history, and the
- * clipboard options let tmux copies reach the system clipboard over OSC 52.
+ * tmux's own bar (the pod header shows connection state, and now the windows
+ * too), `mouse on` makes the wheel scroll tmux's scrollback instead of shell
+ * history, and the clipboard options let tmux copies reach the system
+ * clipboard over OSC 52.
+ *
+ * Every option after `new-session` lands on THIS session only — no `-g` — so a
+ * pod cannot change how the user's own tmux sessions on the same server look.
  */
 function tmuxCommand(session: string, locale: string): string {
   const name = quote(session);
@@ -129,7 +156,9 @@ function tmuxCommand(session: string, locale: string): string {
     `set-environment -g LANG ${locale} \\; ` +
     `set-environment -g LC_CTYPE ${locale} \\; ` +
     `new-session -A -s '${name}' -e LANG=${locale} -e LC_CTYPE=${locale} \\; ` +
-    `set-option status off \\; set-option mouse on`
+    `set-option status off \\; set-option mouse on \\; ` +
+    `set-option set-titles on \\; ` +
+    `set-option set-titles-string '${TITLE_FORMAT}'`
   );
 }
 
@@ -248,6 +277,37 @@ export function renameTmuxSession(
 /** End a session from the sessions list, whoever started it. */
 export function killTmuxSession(host: string | null, name: string): Promise<void> {
   const command = `tmux kill-session -t '${quote(name)}'`;
+  const [file, args] = host
+    ? (["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command]] as const)
+    : (["sh", ["-c", command]] as const);
+  return new Promise((resolve) => {
+    execFile(
+      file,
+      args as string[],
+      { env: { ...process.env, PATH: toolPath } },
+      () => resolve(),
+    );
+  });
+}
+
+/**
+ * Switch the session to one of its windows — what clicking a window in the pod
+ * header does.
+ *
+ * Deliberately NOT typed into the pty as `<prefix> <n>`. That looks simpler and
+ * works for single digits, but tmux only binds the digit keys 0-9, and driving
+ * its command prompt instead (`<prefix> : select-window …`) turns out not to
+ * work at all through a pty write. Walking there with `next-window` does work,
+ * but only when the keystrokes are spaced out — sent as one burst tmux acts on
+ * just the first. Asking the server directly sidesteps all of it, and works the
+ * same for a guest pod whose owner rebound the prefix.
+ */
+export function selectTmuxWindow(
+  host: string | null,
+  session: string,
+  index: number,
+): Promise<void> {
+  const command = `tmux select-window -t '${quote(session)}:${Math.trunc(index)}'`;
   const [file, args] = host
     ? (["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command]] as const)
     : (["sh", ["-c", command]] as const);

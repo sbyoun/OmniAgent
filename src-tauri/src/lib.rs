@@ -78,6 +78,7 @@ pub fn run() {
             pty::tmux_sessions,
             pty::tmux_kill_session,
             pty::tmux_rename_session,
+            pty::tmux_select_window,
             remote_fs::fs_list_dir,
             remote_fs::fs_read_file,
             remote_fs::fs_write_file,

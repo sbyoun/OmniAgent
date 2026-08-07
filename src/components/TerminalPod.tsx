@@ -13,6 +13,7 @@ import {
   fsHomeDir,
   fsStat,
   tmuxRenameSession,
+  tmuxSelectWindow,
   tmuxSessions,
   tmuxSessionStarted,
   onPtyExit,
@@ -46,6 +47,31 @@ class TmuxFriendlyClipboardProvider extends BrowserClipboardProvider {
 
 export type PodStatus = "connecting" | "running" | "exited";
 export type PodActivity = "working" | "idle" | "attention";
+
+/** One tmux window behind the pod, as the header lists it. */
+export interface PodWindow {
+  index: number;
+  name: string;
+  active: boolean;
+}
+
+/**
+ * The window list tmux publishes as the terminal title — `oa:0:zsh|1*:vim|`,
+ * built by TITLE_FORMAT in the pty backends. Returns null for every other
+ * title: a pod running without tmux still gets titles from the shell and from
+ * full-screen apps, and those are not windows.
+ */
+export function parseWindowTitle(title: string): PodWindow[] | null {
+  if (!title.startsWith("oa:")) return null;
+  const windows: PodWindow[] = [];
+  for (const record of title.slice(3).split("|")) {
+    // Name last and unanchored: tmux already stripped `|` from it, but it may
+    // well contain the `:` that separates it from the index.
+    const m = /^(\d+)(\*?):(.*)$/.exec(record);
+    if (m) windows.push({ index: +m[1], name: m[3], active: m[2] === "*" });
+  }
+  return windows;
+}
 
 /** How long output must stay quiet before a working pod counts as idle. */
 const IDLE_AFTER_MS = 4000;
@@ -97,6 +123,12 @@ export interface PodParams {
   dropped?: boolean;
   /** What the user called this pod, if anything. */
   name?: string;
+  /**
+   * The tmux windows in the pod's session, newest state tmux pushed. Only
+   * meaningful while connected — the pod clears it on every (re)connect so a
+   * restored layout never shows a list that predates the current session.
+   */
+  windows?: PodWindow[];
   /** Pane sizes, dragged by the splitters. */
   explorerWidth?: number;
   editorHeight?: number;
@@ -220,6 +252,7 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
     dropped,
     explorerOpen,
     editorOpen,
+    windows = [],
   } = props.params;
   const [renaming, setRenaming] = useState(false);
   const [maximized, setMaximized] = useState(false);
@@ -289,6 +322,19 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
     }
   };
 
+  /**
+   * Jump to a window. The server is asked directly rather than the keystroke
+   * being typed into the pty — see `selectTmuxWindow` for why that route does
+   * not survive double-digit indices. tmux pushes the new title straight after,
+   * so the strip re-marks itself with no extra round trip.
+   */
+  const selectWindow = (index: number) => {
+    // Same default the pod body attaches with: `session` is only stored once
+    // something renames it, so most pods carry the id-derived name instead.
+    const session = props.params.session ?? `omniagent-${props.api.id}`;
+    tmuxSelectWindow(props.params.host, session, index).catch(() => {});
+  };
+
   const iconClass = (active: boolean | undefined) =>
     `material-symbols-outlined text-[16px] cursor-pointer ${
       active ? "text-primary" : "text-on-surface-variant hover:text-on-surface"
@@ -323,6 +369,37 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
           >
             {name || label}
           </span>
+        )}
+        {/*
+          One window is just "the shell" — nothing to switch between — so the
+          strip only earns its space once the session has more. Gated on
+          `running` because a dropped client's last list is stale and its
+          clicks would go nowhere.
+        */}
+        {status === "running" && windows.length > 1 && (
+          <div className="flex items-center gap-1 min-w-0 overflow-hidden">
+            {windows.map((w) => (
+              <span
+                key={w.index}
+                // tmux binds the digit keys only, so past the tenth window
+                // there is no shortcut to advertise — just the click.
+                title={
+                  w.index < 10
+                    ? `${w.name} — Ctrl+B ${w.index}`
+                    : `${w.name} — click to switch`
+                }
+                onMouseDown={guard}
+                onClick={() => selectWindow(w.index)}
+                className={`font-mono text-[10px] leading-none px-1.5 py-1 rounded cursor-pointer shrink-0 max-w-28 truncate ${
+                  w.active
+                    ? "bg-primary/15 text-primary"
+                    : "text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high"
+                }`}
+              >
+                {w.index} {w.name}
+              </span>
+            ))}
+          </div>
         )}
       </div>
       <div className="flex items-center gap-3 shrink-0">
@@ -478,6 +555,20 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     // latest attempt rather than the pod's whole life.
     let spawnedAt = Date.now();
 
+    // tmux publishes the session's window list as the terminal title and
+    // rewrites it on every change, so the header follows `Ctrl+B c` and
+    // `Ctrl+B <n>` without anyone polling — see TITLE_FORMAT in the backends.
+    // tmux repeats the title on attach and on redraws, so compare before
+    // pushing: updateParameters re-renders the tab.
+    let lastTitle = "";
+    const titleSub = term.onTitleChange((title) => {
+      if (disposed || title === lastTitle) return;
+      const windows = parseWindowTitle(title);
+      if (!windows) return;
+      lastTitle = title;
+      props.api.updateParameters({ windows });
+    });
+
     // ---- Agent activity detection (#2): working / idle / needs-input ----
     let activity: PodActivity = "idle";
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -531,7 +622,15 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
      */
     const connect = async () => {
       setDropped(null);
-      props.api.updateParameters({ status: "connecting", dropped: false });
+      // Drop the window list with the old client: a layout restored from disk
+      // carries the last session's windows, and they must not be shown as this
+      // one's. tmux pushes the real list the moment the client attaches.
+      lastTitle = "";
+      props.api.updateParameters({
+        status: "connecting",
+        dropped: false,
+        windows: [],
+      });
       spawnedAt = Date.now();
       try {
         await ptySpawn(podId, host, session, term.rows, term.cols, ownsSession);
@@ -743,6 +842,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       window.removeEventListener("keydown", onModKey);
       window.removeEventListener("keyup", onModKey);
       linkSub.dispose();
+      titleSub.dispose();
       clearTimeout(idleTimer);
       clearTimeout(resizeTimer);
       observer.disconnect();

@@ -133,6 +133,13 @@ export const tmuxRenameSession = (host: string | null, from: string, to: string)
 export const tmuxKillSession = (host: string | null, name: string) =>
   backend.call<void>("tmux_kill_session", { host, name });
 
+/** Brings one of a session's windows to the front — the header's window strip. */
+export const tmuxSelectWindow = (
+  host: string | null,
+  session: string,
+  index: number,
+) => backend.call<void>("tmux_select_window", { host, session, index });
+
 /** Hands a link to the user's browser. */
 export const openExternal = (url: string) =>
   backend.call<void>("open_external", { url });

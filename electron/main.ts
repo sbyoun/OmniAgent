@@ -8,6 +8,7 @@ import {
   killAllPtys,
   killPty,
   resizePty,
+  selectTmuxWindow,
   spawnPty,
   tmuxSessionStarted,
   writePty,
@@ -213,6 +214,11 @@ function registerHandlers() {
     "tmux_rename_session",
     (_e, host: string | null, from: string, to: string) =>
       renameTmuxSession(host, from, to),
+  );
+  ipcMain.handle(
+    "tmux_select_window",
+    (_e, host: string | null, session: string, index: number) =>
+      selectTmuxWindow(host, session, index),
   );
   ipcMain.handle("open_external", (_e, url: string) =>
     /^https?:/i.test(url) ? shell.openExternal(url) : undefined,
