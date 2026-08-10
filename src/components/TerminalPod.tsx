@@ -140,7 +140,7 @@ function Splitter({
  * the caller.
  */
 const PATH_RE =
-  /(?:~|\.{1,2})?\/[\w.\-/@+]+|\b[\w.\-]+\/[\w.\-/@+]+|\b[\w.\-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|toml|ya?ml|md|txt|log|css|scss|html|py|rs|go|java|kt|swift|c|h|cpp|hpp|sh|zsh|sql|env|lock)\b/g;
+  /(?:~|\.{1,2})?\/[\w.\-/@+]+|\b[\w.\-]+\/[\w.\-/@+]+|\b[\w.\-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|toml|ya?ml|md|txt|log|css|scss|html|py|rs|go|java|kt|swift|c|h|cpp|hpp|sh|zsh|sql|env|lock|pdf)\b/g;
 
 /** Strip decoration the shell or an agent tends to put around a path. */
 function cleanPath(raw: string): string {

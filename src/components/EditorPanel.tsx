@@ -21,18 +21,33 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
   const [preview, setPreview] = useState(false);
   const [copied, setCopied] = useState(false);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
+  const [pdfSrc, setPdfSrc] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const valueRef = useRef("");
   const saveRef = useRef<() => void>(() => {});
   const previewRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    return () => {
+      if (pdfSrc) URL.revokeObjectURL(pdfSrc);
+    };
+  }, [pdfSrc]);
+
   const isMarkdown = !!path && /\.(md|markdown|mdx)$/i.test(path);
   const imageType = path ? imageMime(path) : null;
+  const isPdf = !!path && /\.pdf$/i.test(path);
+  /** Nothing here can be edited or saved — the same as an image. */
+  const readOnly = !!imageType || isPdf;
 
   useEffect(() => {
     if (!path) return;
     setContent(null);
     setImageSrc(null);
+    setPdfSrc((old) => {
+      // Object URLs hold the bytes until they are let go.
+      if (old) URL.revokeObjectURL(old);
+      return null;
+    });
     setError(null);
     setSaveState("clean");
     const mime = imageMime(path);
@@ -40,6 +55,17 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
       // Images are fetched as base64 and shown inline instead of as text.
       fsReadBase64(host, path)
         .then((b64) => setImageSrc(`data:${mime};base64,${b64}`))
+        .catch((e) => setError(String(e)));
+      return;
+    }
+    if (/\.pdf$/i.test(path)) {
+      // The viewer built into the webview does the rendering; it just needs a
+      // URL it will accept, and a data: URI is not one.
+      fsReadBase64(host, path)
+        .then((b64) => {
+          const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+          setPdfSrc(URL.createObjectURL(new Blob([bytes], { type: "application/pdf" })));
+        })
         .catch((e) => setError(String(e)));
       return;
     }
@@ -143,7 +169,7 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
               saved to {saved}
             </span>
           )}
-          {path && isMarkdown && !imageType && (
+          {path && isMarkdown && !readOnly && (
             <span
               className={`material-symbols-outlined text-[14px] cursor-pointer ${
                 preview
@@ -156,7 +182,7 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
               {preview ? "code" : "visibility"}
             </span>
           )}
-          {path && !imageType && (
+          {path && !readOnly && (
             <span
               className={`material-symbols-outlined text-[14px] cursor-pointer ${
                 copied
@@ -178,7 +204,7 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
               download
             </span>
           )}
-          {path && !preview && !imageType && (
+          {path && !preview && !readOnly && (
             <span
               className="material-symbols-outlined text-[14px] text-on-surface-variant hover:text-on-surface cursor-pointer"
               title="Save (⌘S)"
@@ -205,6 +231,16 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
           <div className="p-3 text-error text-[11px] font-mono whitespace-pre-wrap select-text">
             {error}
           </div>
+        ) : isPdf ? (
+          pdfSrc ? (
+            <embed
+              src={pdfSrc}
+              type="application/pdf"
+              className="w-full h-full bg-surface-container-lowest"
+            />
+          ) : (
+            <div className="p-3 text-outline text-[11px] font-mono">loading…</div>
+          )
         ) : imageType ? (
           imageSrc ? (
             <div className="h-full overflow-auto bg-surface-container-lowest flex items-center justify-center p-3">

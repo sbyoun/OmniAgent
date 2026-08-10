@@ -106,6 +106,9 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       spellcheck: false,
+      // Chromium's PDF viewer ships as a plugin, and Electron leaves plugins
+      // off — without this a PDF renders as a blank frame.
+      plugins: true,
     },
   });
 

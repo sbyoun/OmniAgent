@@ -39,8 +39,29 @@ export function Explorer({
   const [uploading, setUploading] = useState<string[]>([]);
   const [downloaded, setDownloaded] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  /** Right-click menu: where it opened, and on what (null = the folder). */
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    entry: DirEntry | null;
+  } | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const dragTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
 
   const load = useCallback(
     async (path: string) => {
@@ -95,6 +116,28 @@ export function Explorer({
   };
 
   const joinCwd = (name: string) => `${cwd?.replace(/\/$/, "")}/${name}`;
+
+  /**
+   * A path is the thing you most often want out of a file tree — to paste into
+   * the terminal next to it, or into a message. Remote paths are just as
+   * useful, and there is nothing else here that produces one.
+   */
+  const copy = async (text: string, what: string) => {
+    setMenu(null);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Older WebViews refuse the async clipboard outside a user gesture.
+      const box = document.createElement("textarea");
+      box.value = text;
+      document.body.appendChild(box);
+      box.select();
+      document.execCommand("copy");
+      box.remove();
+    }
+    setCopied(what);
+    setTimeout(() => setCopied(null), 1800);
+  };
 
   const confirmCreate = async () => {
     const name = newName.trim();
@@ -177,6 +220,15 @@ export function Explorer({
           {cwd ?? "…"}
         </span>
         <span
+          className={`${headerIcon} ${loading ? "animate-spin" : ""}`}
+          title="Refresh"
+          // The listing is a snapshot: whatever the agent in the pod next to
+          // it has been writing since is not in it.
+          onClick={() => cwd && load(cwd)}
+        >
+          refresh
+        </span>
+        <span
           className={headerIcon}
           title="New file"
           onClick={() => setCreating("file")}
@@ -231,6 +283,14 @@ export function Explorer({
             />
           </div>
         )}
+        {copied && (
+          <div className="px-1 mb-0.5 text-[10px] text-secondary flex items-center gap-1">
+            <span className="material-symbols-outlined text-[12px]">
+              check_circle
+            </span>
+            <span>{copied} copied</span>
+          </div>
+        )}
         {downloaded && (
           <div className="px-1 mb-0.5 text-[10px] text-secondary flex items-center gap-1">
             <span className="material-symbols-outlined text-[12px]">
@@ -253,6 +313,13 @@ export function Explorer({
             {error}
           </div>
         )}
+        <div
+          className="absolute inset-0 -z-10"
+          onContextMenu={(ev) => {
+            ev.preventDefault();
+            setMenu({ x: ev.clientX, y: ev.clientY, entry: null });
+          }}
+        />
         {!loading &&
           !error &&
           entries.map((e) => (
@@ -262,6 +329,11 @@ export function Explorer({
               onClick={() =>
                 e.is_dir ? load(joinCwd(e.name)) : onOpenFile(joinCwd(e.name))
               }
+              onContextMenu={(ev) => {
+                ev.preventDefault();
+                ev.stopPropagation();
+                setMenu({ x: ev.clientX, y: ev.clientY, entry: e });
+              }}
             >
               <span
                 className={`material-symbols-outlined text-[14px] ${
@@ -291,6 +363,69 @@ export function Explorer({
             </div>
           ))}
       </div>
+
+      {menu && (
+        <div
+          className="fixed z-50 min-w-44 py-1 rounded-md bg-surface-container-high border border-surface-container-highest shadow-lg text-[11px]"
+          style={{ left: menu.x, top: menu.y }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          <div className="px-3 py-1 text-outline truncate max-w-64">
+            {menu.entry ? menu.entry.name : (cwd ?? "")}
+          </div>
+          <div className="h-px bg-surface-container-highest my-1" />
+          {menu.entry && (
+            <button
+              className="w-full text-left px-3 py-1.5 hover:bg-surface-container-highest"
+              onClick={() => {
+                const path = joinCwd(menu.entry!.name);
+                setMenu(null);
+                if (menu.entry!.is_dir) load(path);
+                else onOpenFile(path);
+              }}
+            >
+              {menu.entry.is_dir ? "Open folder" : "Open in editor"}
+            </button>
+          )}
+          <button
+            className="w-full text-left px-3 py-1.5 hover:bg-surface-container-highest"
+            onClick={() =>
+              copy(
+                menu.entry ? joinCwd(menu.entry.name) : (cwd ?? ""),
+                "path",
+              )
+            }
+          >
+            Copy path
+          </button>
+          {menu.entry && (
+            <button
+              className="w-full text-left px-3 py-1.5 hover:bg-surface-container-highest"
+              onClick={() => copy(menu.entry!.name, "name")}
+            >
+              Copy name
+            </button>
+          )}
+          {menu.entry && !menu.entry.is_dir && (
+            <button
+              className="w-full text-left px-3 py-1.5 hover:bg-surface-container-highest"
+              onClick={() => {
+                const name = menu.entry!.name;
+                setMenu(null);
+                fsDownload(host, joinCwd(name))
+                  .then((to) => {
+                    setDownloaded(to.replace(/^.*\//, ""));
+                    setTimeout(() => setDownloaded(null), 2500);
+                  })
+                  .catch((err) => setError(String(err)));
+              }}
+            >
+              Download
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
