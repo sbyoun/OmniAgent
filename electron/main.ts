@@ -1,4 +1,11 @@
-import { app, BrowserWindow, Menu, ipcMain, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  Menu,
+  type MenuItemConstructorOptions,
+  ipcMain,
+  shell,
+} from "electron";
 import { join } from "node:path";
 import * as files from "./files";
 import {
@@ -7,7 +14,9 @@ import {
   listTmuxSessions,
   killAllPtys,
   killPty,
+  detachPty,
   resizePty,
+  selectTmuxWindow,
   spawnPty,
   tmuxSessionStarted,
   writePty,
@@ -20,6 +29,72 @@ const devUrl = process.env.VITE_DEV_SERVER_URL;
 // A dev run has no bundle to read the name from, so the menu bar would say
 // "Electron". Set it before anything builds a menu.
 app.setName("OmniAgent");
+
+/**
+ * The renderer owns the font list and the active choice (they live in its
+ * localStorage); the native menu is only a projection. This mirror is kept so
+ * the menu can be built at startup — before the renderer has connected — and
+ * rebuilt in place whenever the renderer pushes a change through
+ * `set_font_menu`. The two built-ins match `fontOptions()` in src/settings.ts.
+ */
+interface FontMenuState {
+  options: { key: string; label: string }[];
+  selected: string;
+}
+let fontState: FontMenuState = {
+  options: [
+    { key: "default", label: "Default · Inter / JetBrains Mono" },
+    { key: "d2coding", label: "D2Coding" },
+  ],
+  selected: "default",
+};
+
+/**
+ * Mirror of the renderer's `activePodBorder` setting, kept here for the same
+ * reason as `fontState`: the menu is built before the renderer connects.
+ * Matches the DEFAULTS in src/settings.ts.
+ */
+let podBorder = true;
+
+/** Send to the window the menu belongs to (there is only ever the one). */
+function sendToWindow(channel: string, ...args: unknown[]) {
+  const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  win?.webContents.send(channel, ...args);
+}
+
+/** View → Font, rebuilt from `fontState` each time the menu is (re)built. */
+function fontSubmenu(): MenuItemConstructorOptions {
+  const items: MenuItemConstructorOptions[] = fontState.options.map((o) => ({
+    id: `font:${o.key}`,
+    label: o.label,
+    type: "radio",
+    checked: o.key === fontState.selected,
+    click: () => sendToWindow("menu-set-font", o.key),
+  }));
+  items.push(
+    { type: "separator" },
+    {
+      id: "font:add",
+      label: "Add Local Font…",
+      click: () => sendToWindow("menu-add-font"),
+    },
+  );
+  return { label: "Font", submenu: items };
+}
+
+/**
+ * View → Active Pod Border. Electron flips `checked` itself before the click
+ * handler runs, so the item's own state is the new value to hand the renderer.
+ */
+function podBorderItem(): MenuItemConstructorOptions {
+  return {
+    id: "pods:border",
+    label: "Active Pod Border",
+    type: "checkbox",
+    checked: podBorder,
+    click: (item) => sendToWindow("menu-set-pod-border", item.checked),
+  };
+}
 
 /**
  * The macOS application menu. Without one, Electron installs a default menu
@@ -67,6 +142,9 @@ function buildMenu() {
         submenu: [
           { role: "reload" },
           { role: "toggleDevTools" },
+          { type: "separator" },
+          fontSubmenu(),
+          podBorderItem(),
           { type: "separator" },
           { role: "resetZoom" },
           { role: "zoomIn" },
@@ -170,6 +248,7 @@ function registerHandlers() {
     resizePty(id, rows, cols),
   );
   ipcMain.on("pty_kill", (_e, id: string) => killPty(id));
+  ipcMain.on("pty_detach", (_e, id: string) => detachPty(id));
   ipcMain.handle("tmux_session_started", (_e, host: string | null, session: string) =>
     tmuxSessionStarted(host, session),
   );
@@ -217,9 +296,33 @@ function registerHandlers() {
     (_e, host: string | null, from: string, to: string) =>
       renameTmuxSession(host, from, to),
   );
+  ipcMain.handle(
+    "tmux_select_window",
+    (_e, host: string | null, session: string, index: number) =>
+      selectTmuxWindow(host, session, index),
+  );
   ipcMain.handle("open_external", (_e, url: string) =>
     /^https?:/i.test(url) ? shell.openExternal(url) : undefined,
   );
   ipcMain.handle("layout_read", () => files.readLayout());
   ipcMain.handle("layout_write", (_e, content: string) => files.writeLayout(content));
+
+  // The renderer pushes its font list + selection; rebuild the menu so View →
+  // Font reflects the custom families it has and marks the active one.
+  ipcMain.handle(
+    "set_font_menu",
+    (_e, options: FontMenuState["options"], selected: string) => {
+      fontState = { options, selected };
+      buildMenu();
+    },
+  );
+
+  // Same projection for the pod-border toggle: the renderer persists it, the
+  // menu only shows it — including the startup push, which corrects the mirror
+  // above for anyone who turned it off in an earlier run.
+  ipcMain.handle("set_pod_border_menu", (_e, enabled: boolean) => {
+    if (podBorder === enabled) return;
+    podBorder = enabled;
+    buildMenu();
+  });
 }

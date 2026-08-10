@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 pub struct PtyInstance {
     master: Box<dyn MasterPty + Send>,
@@ -14,7 +14,9 @@ pub struct PtyInstance {
     host: Option<String>,
     /// Name of the tmux session backing this pod (local or remote). Killed
     /// when the pod is explicitly closed so sessions don't accumulate;
-    /// preserved on app quit so the pod can restore.
+    /// preserved on app quit so the pod can restore. Cleared the moment the
+    /// client exits on its own, so a connection that merely dropped can never
+    /// take the session down with it.
     tmux_session: Option<String>,
     /// Whether this pod created its session. A pod opened onto a session that
     /// was already running — from the sessions list — is a guest: closing the
@@ -115,6 +117,26 @@ struct PtyExit {
     id: String,
 }
 
+/// The pod's window list, published as the terminal title.
+///
+/// tmux rewrites the title whenever the window set or the active window
+/// changes, so the pod header tracks `Ctrl+B c` / `Ctrl+B <n>` with no polling
+/// at all. That is what makes this affordable for REMOTE pods: a
+/// `tmux list-windows` poll would mean a fresh `ssh` every few seconds per pod,
+/// while the title rides the pty stream that is already open.
+///
+/// `#{W:<inactive>,<active>}` loops the session's windows, emitting the second
+/// form for the current one — so the active window arrives marked with `*`.
+/// Names are cut to 12 chars and stripped of the `|` record separator; the
+/// class in `s/[|]/ /` is deliberate, since a bare `|` there reads as regex
+/// alternation and matches nothing. The `oa:` sentinel keeps titles set by the
+/// shell or a full-screen app (the no-tmux fallback below) from being parsed
+/// as windows.
+///
+/// Kept out of the `format!` strings below on purpose: every `{` here would
+/// otherwise have to be doubled.
+const TITLE_FORMAT: &str = "oa:#{W:#{window_index}:#{=12:#{s/[|]/ /:window_name}}|,#{window_index}*:#{=12:#{s/[|]/ /:window_name}}|}";
+
 /// Spawn a PTY. `host: None` opens the local login shell; `Some(host)` runs
 /// `ssh -t <host>` attaching to (or creating) a tmux session per the SDD.
 /// For local pods, `session: Some(name)` wraps the shell in a named tmux
@@ -166,9 +188,10 @@ pub fn pty_spawn(
                     // was started with — and a server left over from a
                     // non-UTF-8 launch breaks multibyte (Hangul) input while
                     // the rest of the app looks fine.
-                    "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG en_US.UTF-8 \\; set-environment -g LC_CTYPE en_US.UTF-8 \\; new-session -A -s '{}' -e LANG=en_US.UTF-8 -e LC_CTYPE=en_US.UTF-8 \\; set-option status off \\; set-option mouse on 2>/dev/null || tmux -u new-session -A -s '{}' 2>/dev/null || exec $SHELL -l",
+                    "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG en_US.UTF-8 \\; set-environment -g LC_CTYPE en_US.UTF-8 \\; new-session -A -s '{}' -e LANG=en_US.UTF-8 -e LC_CTYPE=en_US.UTF-8 \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || tmux -u new-session -A -s '{}' 2>/dev/null || exec $SHELL -l",
                     name.replace('\'', ""),
-                    name.replace('\'', "")
+                    name.replace('\'', ""),
+                    title = TITLE_FORMAT
                 ),
                 None => "exec $SHELL -l".to_string(),
             };
@@ -188,10 +211,11 @@ pub fn pty_spawn(
                         "-l",
                         "-c",
                         &format!(
-                            "command -v tmux >/dev/null 2>&1 && exec tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG {lang} \\; set-environment -g LC_CTYPE {lang} \\; new-session -A -s '{}' -e LANG={lang} -e LC_CTYPE={lang} \\; set-option status off \\; set-option mouse on || exec \"{}\" -l",
+                            "command -v tmux >/dev/null 2>&1 && exec tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG {lang} \\; set-environment -g LC_CTYPE {lang} \\; new-session -A -s '{}' -e LANG={lang} -e LC_CTYPE={lang} \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' || exec \"{}\" -l",
                             name.replace('\'', ""),
                             shell,
-                            lang = &lang
+                            lang = &lang,
+                            title = TITLE_FORMAT
                         ),
                     ]);
                 }
@@ -284,8 +308,23 @@ pub fn pty_spawn(
                     }
                 }
             }
-            // Only the current generation may report the pod as exited.
+            // Only the current generation may report the pod as exited — a
+            // superseded instance would otherwise disarm its own successor.
             if is_current(&reader_id) {
+                // The client died on its own — a dropped ssh connection, a
+                // killed tmux client, an `exit` typed into the shell.
+                // Whichever it was, this instance has no claim on the tmux
+                // session any more: the session outlives the connection, and
+                // the pod close that may follow must not be able to reach the
+                // kill-session branch in `pty_kill`. Only a still-live client
+                // counts as an explicit close.
+                if let Some(mgr) = reader_app.try_state::<PtyManager>() {
+                    if let Ok(mut map) = mgr.ptys.lock() {
+                        if let Some(inst) = map.get_mut(&reader_id) {
+                            inst.tmux_session = None;
+                        }
+                    }
+                }
                 let _ = reader_app.emit("pty-exit", PtyExit { id: reader_id });
             }
         });
@@ -385,7 +424,9 @@ pub fn pty_kill(state: State<'_, PtyManager>, id: String) -> Result<(), String> 
         let _ = inst.child.kill();
         // Explicit close: tear down the pod's backing tmux session too
         // (local or remote). Done on a thread so a slow ssh round-trip
-        // never blocks closing the pod.
+        // never blocks closing the pod. A client that had already exited
+        // cleared `tmux_session` on the way out, so a dropped connection —
+        // and the pod teardown that follows it — leaves the work running.
         if let Some(name) = inst.tmux_session.filter(|_| inst.owns_session) {
             let host = inst.host;
             std::thread::spawn(move || match host {
@@ -413,10 +454,62 @@ pub fn pty_kill(state: State<'_, PtyManager>, id: String) -> Result<(), String> 
     Ok(())
 }
 
+/// Detach a pod — the ⌘/Ctrl+W close. Tears down the client exactly as
+/// `pty_kill` does (drop the generation, kill the child) but never touches the
+/// tmux session: the work keeps running and the pod reattaches to it on the
+/// next launch. The panel teardown that follows sends `pty_kill`, which finds
+/// nothing left and no-ops — so this must land first, which the caller ensures
+/// by awaiting it before closing the panel.
+#[tauri::command]
+pub fn pty_detach(state: State<'_, PtyManager>, id: String) -> Result<(), String> {
+    let mut map = state.ptys.lock().unwrap();
+    state.gens.lock().unwrap().remove(&id);
+    if let Some(mut inst) = map.remove(&id) {
+        let _ = inst.child.kill();
+    }
+    Ok(())
+}
+
 /// End a session from the sessions list, whoever started it.
 #[tauri::command]
 pub async fn tmux_kill_session(host: Option<String>, name: String) {
     let command = format!("tmux kill-session -t '{}'", name.replace('\'', ""));
+    let _ = match host {
+        None => std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .env(
+                "PATH",
+                format!(
+                    "{}:/opt/homebrew/bin:/usr/local/bin",
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .output(),
+        Some(h) => std::process::Command::new("ssh")
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
+            .arg(&command)
+            .output(),
+    };
+}
+
+/// Switch the session to one of its windows — what clicking a window in the pod
+/// header does.
+///
+/// Deliberately NOT typed into the pty as `<prefix> <n>`. That looks simpler and
+/// works for single digits, but tmux only binds the digit keys 0-9, and driving
+/// its command prompt instead (`<prefix> : select-window …`) turns out not to
+/// work at all through a pty write. Walking there with `next-window` does work,
+/// but only when the keystrokes are spaced out — sent as one burst tmux acts on
+/// just the first. Asking the server directly sidesteps all of it, and works the
+/// same for a guest pod whose owner rebound the prefix.
+#[tauri::command]
+pub async fn tmux_select_window(host: Option<String>, session: String, index: i64) {
+    let command = format!(
+        "tmux select-window -t '{}:{}'",
+        session.replace('\'', ""),
+        index
+    );
     let _ = match host {
         None => std::process::Command::new("sh")
             .arg("-c")

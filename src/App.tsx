@@ -5,12 +5,25 @@ import {
   themeDark,
 } from "dockview-react";
 import { useEffect, useRef, useState } from "react";
-import { layoutRead, layoutWrite, listSshHosts, shellName, SshHost } from "./ipc";
+import {
+  layoutRead,
+  layoutWrite,
+  listSshHosts,
+  onMenuAddFont,
+  onMenuSetFont,
+  onMenuSetPodBorder,
+  ptyDetach,
+  setFontMenu,
+  setPodBorderMenu,
+  shellName,
+  SshHost,
+} from "./ipc";
 import { startWindowDrag } from "./window";
 import { HostStats, subscribeHostStats } from "./hostStats";
-import { setSetting, useSettings } from "./settings";
+import { fontOptions, selectFont, setSetting, useSettings } from "./settings";
 import { PodParams, PodTab, TerminalPod } from "./components/TerminalPod";
 import { Sessions } from "./components/Sessions";
+import { FontManager } from "./components/FontManager";
 
 const components = { terminal: TerminalPod };
 const tabComponents = { pod: PodTab };
@@ -18,6 +31,12 @@ const tabComponents = { pod: PodTab };
 const LAYOUT_KEY = "omniagent.layout.v1";
 // Pre-rename key, read once as a fallback so existing layouts migrate.
 const LEGACY_LAYOUT_KEY = "omniterm.layout.v1";
+
+// The modifier that carries the app's own shortcuts: ⌘ on macOS, Ctrl on
+// Windows/Linux. Following each platform's convention is not just polish here —
+// Ctrl+W on macOS is the shell's "delete previous word", so binding pod-close
+// to it would hijack a key people lean on inside the terminal.
+const IS_MAC = navigator.platform.toUpperCase().includes("MAC");
 
 let podCounter = 0;
 
@@ -39,6 +58,7 @@ export default function App() {
     total: 0,
   });
   const apiRef = useRef<DockviewApi | null>(null);
+  const [fontManagerOpen, setFontManagerOpen] = useState(false);
 
   useEffect(() => {
     listSshHosts().then(setHosts).catch(console.error);
@@ -59,6 +79,48 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Pod keyboard shortcuts (⌘ on macOS, Ctrl elsewhere):
+  //   • mod+W          — close the active pod, LEAVING its tmux session
+  //                      running. That is the whole difference from the tab's
+  //                      ✕, which kills the session: mod+W detaches, so the
+  //                      work is still there next launch (and still on the
+  //                      server right now, for a remote pod).
+  //   • mod+Shift+[ ]  — step to the previous / next pod and focus it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+      if (!mod || e.altKey) return;
+      const api = apiRef.current;
+      if (!api) return;
+
+      // Close the active pod, keeping its session. Detach on the backend
+      // first, then remove the panel — the teardown's ptyKill then finds the
+      // client already gone and never reaches its kill-session branch.
+      if (!e.shiftKey && e.code === "KeyW") {
+        const active = api.activePanel;
+        if (!active) return;
+        e.preventDefault();
+        void ptyDetach(active.id).then(() => active.api.close());
+        return;
+      }
+
+      // Cycle pods. Match on e.code (the physical bracket keys) because Shift
+      // turns the characters into { and }, and wrap around at both ends.
+      if (e.shiftKey && (e.code === "BracketLeft" || e.code === "BracketRight")) {
+        const panels = api.panels;
+        if (panels.length < 2) return;
+        e.preventDefault();
+        const current = api.activePanel?.id;
+        const i = panels.findIndex((p) => p.id === current);
+        const step = e.code === "BracketRight" ? 1 : -1;
+        const next = panels[(i + step + panels.length) % panels.length];
+        next.api.setActive();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // This machine's load, shown in the footer.
   const [localStats, setLocalStats] = useState<HostStats | null>(null);
   const settings = useSettings();
@@ -69,6 +131,37 @@ export default function App() {
     }
     return subscribeHostStats(null, setLocalStats);
   }, [settings.meters]);
+
+  // The native Font menu (View → Font) is the entry point for the font
+  // feature. Selecting an item applies it; "Add Local Font…" opens the manager.
+  useEffect(() => {
+    const offSet = onMenuSetFont((key) => selectFont(key));
+    const offAdd = onMenuAddFont(() => setFontManagerOpen(true));
+    const offBorder = onMenuSetPodBorder((on) => setSetting("activePodBorder", on));
+    return () => {
+      offSet();
+      offAdd();
+      offBorder();
+    };
+  }, []);
+
+  // Keep the native menu in step with the renderer's font state — it owns the
+  // list and the selection, so any change (add / remove / pick) is re-projected.
+  useEffect(() => {
+    setFontMenu(
+      fontOptions(settings.customFonts).map((o) => ({
+        key: o.key,
+        label: o.label,
+      })),
+      settings.font,
+    );
+  }, [settings.font, settings.customFonts]);
+
+  // Likewise for the pod-border checkbox, including the first run — the menu
+  // is built before the renderer connects, so this is what corrects it.
+  useEffect(() => {
+    setPodBorderMenu(settings.activePodBorder);
+  }, [settings.activePodBorder]);
 
   // Fleet health summary: poll pod activity params (cheap — a handful of
   // pods) so the header always shows who is working and who is stuck.
@@ -389,8 +482,15 @@ export default function App() {
             </aside>
           )}
 
-          {/* Pod grid */}
-          <main className="flex-1 min-w-0 bg-surface relative">
+          {/* Pod grid. `pods-multi` turns on the focus ring drawn around the
+              active pod (index.css) — with one pod there is nothing to tell
+              apart, so the ring only appears once a second one opens, and only
+              while View → Active Pod Border is on. */}
+          <main
+            className={`flex-1 min-w-0 bg-surface relative ${
+              podCount > 1 && settings.activePodBorder ? "pods-multi" : ""
+            }`}
+          >
             {podCount === 0 && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-outline z-10 pointer-events-none">
                 <span className="material-symbols-outlined text-[48px]">
@@ -505,6 +605,9 @@ export default function App() {
         </footer>
       </div>
       </div>
+      {fontManagerOpen && (
+        <FontManager onClose={() => setFontManagerOpen(false)} />
+      )}
     </div>
   );
 }

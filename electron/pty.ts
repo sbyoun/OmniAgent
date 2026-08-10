@@ -10,7 +10,8 @@ interface Instance {
   /**
    * Name of the tmux session backing this pod. Killed when the pod is
    * explicitly closed so sessions don't accumulate; preserved on app quit so
-   * the pod can restore.
+   * the pod can restore. Cleared the moment the client exits on its own, so a
+   * connection that merely dropped can never take the session down with it.
    */
   session: string | null;
   /**
@@ -103,6 +104,29 @@ const lang = /utf-?8/i.test(process.env.LANG ?? "")
 const quote = (s: string) => s.replace(/'/g, "");
 
 /**
+ * The pod's window list, published as the terminal title.
+ *
+ * tmux rewrites the title whenever the window set or the active window changes,
+ * so the pod header tracks `Ctrl+B c` / `Ctrl+B <n>` with no polling at all.
+ * That is what makes this affordable for REMOTE pods: a `tmux list-windows`
+ * poll would mean a fresh `ssh` every few seconds per pod, while the title
+ * rides the pty stream that is already open.
+ *
+ * `#{W:<inactive>,<active>}` loops the session's windows, emitting the second
+ * form for the current one — so the active window arrives marked with `*`
+ * rather than having to be looked up separately. Names are cut to 12 chars and
+ * stripped of the `|` record separator; the class in `s/[|]/ /` is deliberate,
+ * since a bare `|` there reads as regex alternation and matches nothing.
+ *
+ * The `oa:` sentinel matters: without tmux (the fallback path below) the shell
+ * and full-screen apps set titles of their own, and those must not be parsed
+ * as windows.
+ */
+const TITLE_FORMAT =
+  "oa:#{W:#{window_index}:#{=12:#{s/[|]/ /:window_name}}|," +
+  "#{window_index}*:#{=12:#{s/[|]/ /:window_name}}|}";
+
+/**
  * Attach-or-create the pod's own tmux session.
  *
  * Each pod gets its OWN named session — opening a host twice must create two
@@ -110,9 +134,13 @@ const quote = (s: string) => s.replace(/'/g, "");
  * itself: without it the shell inherits whatever environment the tmux *server*
  * was started with, and a server left over from a non-UTF-8 launch breaks
  * multibyte input while the rest of the app looks fine. `status off` hides
- * tmux's own bar (the pod header already shows connection state), `mouse on`
- * makes the wheel scroll tmux's scrollback instead of shell history, and the
- * clipboard options let tmux copies reach the system clipboard over OSC 52.
+ * tmux's own bar (the pod header shows connection state, and now the windows
+ * too), `mouse on` makes the wheel scroll tmux's scrollback instead of shell
+ * history, and the clipboard options let tmux copies reach the system
+ * clipboard over OSC 52.
+ *
+ * Every option after `new-session` lands on THIS session only — no `-g` — so a
+ * pod cannot change how the user's own tmux sessions on the same server look.
  */
 function tmuxCommand(session: string, locale: string): string {
   const name = quote(session);
@@ -128,7 +156,9 @@ function tmuxCommand(session: string, locale: string): string {
     `set-environment -g LANG ${locale} \\; ` +
     `set-environment -g LC_CTYPE ${locale} \\; ` +
     `new-session -A -s '${name}' -e LANG=${locale} -e LC_CTYPE=${locale} \\; ` +
-    `set-option status off \\; set-option mouse on`
+    `set-option status off \\; set-option mouse on \\; ` +
+    `set-option set-titles on \\; ` +
+    `set-option set-titles-string '${TITLE_FORMAT}'`
   );
 }
 
@@ -191,7 +221,18 @@ export function spawnPty(
     sender.send("pty-output", { id, data });
   });
   proc.onExit(() => {
-    if (!isCurrent() || sender.isDestroyed()) return;
+    // Superseded instances stop here: the map already holds their successor,
+    // and clearing its session would disarm the wrong pod.
+    if (!isCurrent()) return;
+    // The client died on its own — a dropped ssh connection, a killed tmux
+    // client, a `exit` typed into the shell. Whichever it was, this instance
+    // has no claim on the tmux session any more: the session outlives the
+    // connection, and the pod close that may follow must not be able to reach
+    // the kill-session branch below. Only a still-live client counts as an
+    // explicit close.
+    const inst = instances.get(id);
+    if (inst) inst.session = null;
+    if (sender.isDestroyed()) return;
     sender.send("pty-exit", { id });
   });
 
@@ -250,8 +291,44 @@ export function killTmuxSession(host: string | null, name: string): Promise<void
 }
 
 /**
+ * Switch the session to one of its windows — what clicking a window in the pod
+ * header does.
+ *
+ * Deliberately NOT typed into the pty as `<prefix> <n>`. That looks simpler and
+ * works for single digits, but tmux only binds the digit keys 0-9, and driving
+ * its command prompt instead (`<prefix> : select-window …`) turns out not to
+ * work at all through a pty write. Walking there with `next-window` does work,
+ * but only when the keystrokes are spaced out — sent as one burst tmux acts on
+ * just the first. Asking the server directly sidesteps all of it, and works the
+ * same for a guest pod whose owner rebound the prefix.
+ */
+export function selectTmuxWindow(
+  host: string | null,
+  session: string,
+  index: number,
+): Promise<void> {
+  const command = `tmux select-window -t '${quote(session)}:${Math.trunc(index)}'`;
+  const [file, args] = host
+    ? (["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command]] as const)
+    : (["sh", ["-c", command]] as const);
+  return new Promise((resolve) => {
+    execFile(
+      file,
+      args as string[],
+      { env: { ...process.env, PATH: toolPath } },
+      () => resolve(),
+    );
+  });
+}
+
+/**
  * Explicit close: tear down the pod's backing tmux session too, so sessions
  * don't pile up. Detached so a slow ssh round-trip never blocks closing.
+ *
+ * "Explicit" means a client that was still alive when the pod closed. One that
+ * had already exited cleared its session on the way out (see `onExit`), so a
+ * dropped connection — and the pod teardown that follows it — leaves the work
+ * on the server running.
  */
 export function killPty(id: string): void {
   const inst = instances.get(id);
@@ -276,6 +353,22 @@ export function killPty(id: string): void {
       env: { ...process.env, PATH: toolPath },
     }).unref();
   }
+}
+
+/**
+ * Detach a pod — the ⌘/Ctrl+W close. Tears down the client exactly as
+ * `killPty` does (drop the generation first so its `onExit` stays silent, then
+ * kill the process), but never touches the tmux session: the work keeps
+ * running, and the pod reattaches to it on the next launch. The panel teardown
+ * that follows calls `killPty`, which finds nothing left and no-ops — so this
+ * must run first, which the caller guarantees.
+ */
+export function detachPty(id: string): void {
+  const inst = instances.get(id);
+  if (!inst) return;
+  instances.delete(id);
+  generations.delete(id);
+  inst.proc.kill();
 }
 
 /**

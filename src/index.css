@@ -2,6 +2,32 @@
 @import "dockview-react/dist/styles/dockview.css";
 @import "@xterm/xterm/css/xterm.css";
 
+/*
+ * D2Coding — an optional whole-app font (View → Font), bundled so it works
+ * offline in both the Electron and Tauri builds. The files live in src/ (not
+ * public/) on purpose: Vite hashes them and rewrites these url()s relative to
+ * the emitted CSS, which is what makes them resolve under Electron's file://
+ * load (base: "./"). font-display: swap keeps the terminal's cell measurement
+ * from blocking on the ~1.5 MB download — the pods re-measure once the font
+ * lands, the same dance the JetBrains Mono load already uses. The font is only
+ * fetched when something actually renders in it, so the default choice never
+ * pays for it. Weight ranges map the UI's 500/600/700 onto the two real cuts.
+ */
+@font-face {
+  font-family: "D2Coding";
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url("./fonts/d2coding-full.woff2") format("woff2");
+}
+@font-face {
+  font-family: "D2Coding";
+  font-style: normal;
+  font-weight: 600 900;
+  font-display: swap;
+  src: url("./fonts/d2coding-bold-full.woff2") format("woff2");
+}
+
 /* Design tokens from docs/design.md (Stitch: Agentic Server Control Tower) */
 @theme {
   --color-primary: #95ccff;
@@ -79,12 +105,55 @@ body,
   padding: 0;
 }
 
-/* Stacked pods: make the front (active) tab unmistakable — brighter
-   surface with a primary accent bar on top; back tabs are dimmed. */
-.dockview-theme-dark .dv-tab.dv-active-tab {
-  background: #2f2f2f;
+/*
+ * Which pod takes your keystrokes. Dockview marks the focused group
+ * `dv-active-group`, so both the frame ring below and the tab treatment hang
+ * off that one class — with several pods tiled, "where does my typing go" has
+ * to be answerable from across the grid, not by hunting the headers.
+ *
+ * The ring is an ::after overlay rather than a real border so moving focus
+ * between pods never reflows the grid, and its z-index puts it above xterm's
+ * canvas layers (which top out at 11 inside a stacking context the pod does
+ * not create) while still passing under dockview's drop preview at 9999.
+ * 2px matches the accent bar on the tab below, so the ring and the header
+ * read as one frame rather than two weights of the same blue.
+ * Scoped to .pods-multi — App only sets it past the second pod (and only
+ * while View → Active Pod Border is on), since a lone pod is trivially the
+ * active one and does not need to be circled.
+ */
+.dockview-theme-dark .dv-groupview {
+  position: relative;
+}
+.pods-multi .dockview-theme-dark .dv-groupview.dv-active-group::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  pointer-events: none;
+  border: 2px solid var(--color-primary-container);
+  box-shadow: inset 0 0 14px rgba(86, 156, 214, 0.12);
+}
+
+/* The active pod's header carries the same accent as its ring: brighter
+   surface, primary bar along the top edge. Pods that are merely open stay
+   flat — the selectors match dockview's own group-scoped ones (which set the
+   tab background from --dv-*group-* vars) so these win on specificity. */
+.dockview-theme-dark
+  .dv-groupview.dv-active-group
+  > .dv-tabs-and-actions-container
+  .dv-tabs-container
+  > .dv-tab.dv-active-tab {
+  background-color: #2f2f2f;
   box-shadow: inset 0 2px 0 0 #569cd6;
 }
+.dockview-theme-dark
+  .dv-groupview.dv-inactive-group
+  > .dv-tabs-and-actions-container
+  .dv-tabs-container
+  > .dv-tab.dv-active-tab {
+  background-color: #1b1b1c;
+}
+/* Stacked pods: back tabs are dimmed in either group. */
 .dockview-theme-dark .dv-tab.dv-inactive-tab {
   opacity: 0.45;
 }

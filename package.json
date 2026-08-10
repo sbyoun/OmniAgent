@@ -8,12 +8,15 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "dev:electron": "npm run build:main && cross-env VITE_DEV_SERVER_URL=http://localhost:1420 electron .",
+    "package:local": "cross-env CSC_IDENTITY_AUTO_DISCOVERY=false SKIP_NOTARIZE=1 npm run package",
     "build:main": "node scripts/build-electron.mjs",
     "build:app": "vite build && npm run build:main",
     "package": "npm run build:app && electron-builder",
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/*/spawn-helper 2>/dev/null || true",
     "tauri": "tauri",
-    "test:ime": "esbuild src/ime.ts --bundle --format=esm --external:@xterm/xterm --outfile=dist-test/ime.mjs --log-level=error && node tests/ime.test.mjs"
+    "test:ime": "esbuild src/ime.ts --bundle --format=esm --external:@xterm/xterm --outfile=dist-test/ime.mjs --log-level=error && node tests/ime.test.mjs",
+    "test:pty": "esbuild electron/pty.ts --bundle --format=esm --platform=node --external:node-pty --external:electron --outfile=dist-test/pty.mjs --log-level=error && node tests/pty-session.test.mjs",
+    "test": "npm run test:ime && npm run test:pty"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

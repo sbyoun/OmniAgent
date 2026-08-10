@@ -74,6 +74,15 @@ export const ptyResize = (id: string, rows: number, cols: number) =>
 
 export const ptyKill = (id: string) => backend.call<void>("pty_kill", { id });
 
+/**
+ * Close a pod but leave its tmux session running (⌘/Ctrl+W). Unlike
+ * `ptyKill`, the session is never touched — the work stays put and the pod
+ * reattaches to it next launch. Must be awaited before the panel is removed so
+ * it lands ahead of the teardown's `ptyKill`, which then finds nothing to do.
+ */
+export const ptyDetach = (id: string) =>
+  backend.call<void>("pty_detach", { id });
+
 /** Epoch seconds when the pod's tmux session was created, if it has one. */
 export const tmuxSessionStarted = (host: string | null, session: string) =>
   backend.call<number | null>("tmux_session_started", { host, session });
@@ -133,6 +142,13 @@ export const tmuxRenameSession = (host: string | null, from: string, to: string)
 export const tmuxKillSession = (host: string | null, name: string) =>
   backend.call<void>("tmux_kill_session", { host, name });
 
+/** Brings one of a session's windows to the front — the header's window strip. */
+export const tmuxSelectWindow = (
+  host: string | null,
+  session: string,
+  index: number,
+) => backend.call<void>("tmux_select_window", { host, session, index });
+
 /** Hands a link to the user's browser. */
 export const openExternal = (url: string) =>
   backend.call<void>("open_external", { url });
@@ -159,3 +175,37 @@ export const onPtyOutput = async (
 export const onPtyExit = async (
   cb: (payload: { id: string }) => void,
 ): Promise<UnlistenFn> => backend.on("pty-exit", cb);
+
+/** One entry the native Font menu (View → Font) should list. */
+export interface FontMenuOption {
+  key: string;
+  label: string;
+}
+
+/**
+ * Rebuild the native Font menu to mirror the renderer's font state — the
+ * renderer owns the list and the selection (it lives in localStorage), so the
+ * menu is only a projection of it. Called on startup and after every change.
+ * Best-effort: a shell without a native menu simply ignores the call.
+ */
+export const setFontMenu = (options: FontMenuOption[], selected: string) =>
+  backend.call<void>("set_font_menu", { options, selected }).catch(() => {});
+
+/** The user picked a font in the native menu. Payload is the option's key. */
+export const onMenuSetFont = (cb: (key: string) => void): UnlistenFn =>
+  backend.on("menu-set-font", cb);
+
+/** The user chose "Add Local Font…" in the native menu. */
+export const onMenuAddFont = (cb: () => void): UnlistenFn =>
+  backend.on("menu-add-font", cb);
+
+/**
+ * Mirror the active-pod-border setting onto View → Active Pod Border. Same
+ * arrangement as the font menu: the renderer owns the value, the menu shows it.
+ */
+export const setPodBorderMenu = (enabled: boolean) =>
+  backend.call<void>("set_pod_border_menu", { enabled }).catch(() => {});
+
+/** The user toggled View → Active Pod Border. Payload is the new state. */
+export const onMenuSetPodBorder = (cb: (enabled: boolean) => void): UnlistenFn =>
+  backend.on("menu-set-pod-border", cb);
