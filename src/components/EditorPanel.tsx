@@ -24,6 +24,13 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [pdfSrc, setPdfSrc] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
+  /**
+   * Bumped to re-read the file. What is on screen is a copy taken when the
+   * file was opened, and the agent in the pod next to it edits the original.
+   */
+  const [reload, setReload] = useState(0);
+  /** Re-reading throws away unsaved edits, so it asks first. */
+  const [confirmReload, setConfirmReload] = useState(false);
   const valueRef = useRef("");
   const saveRef = useRef<() => void>(() => {});
   const previewRef = useRef<HTMLDivElement>(null);
@@ -81,7 +88,7 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
         setContent(text);
       })
       .catch((e) => setError(String(e)));
-  }, [host, path]);
+  }, [host, path, reload]);
 
   const previewHtml = useMemo(() => {
     if (!preview || content === null) return "";
@@ -210,6 +217,39 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
               {copied ? "check" : "content_copy"}
             </span>
           )}
+          {path &&
+            (confirmReload ? (
+              <>
+                <span
+                  className="text-[10px] text-error cursor-pointer hover:underline"
+                  title="Discard the unsaved edits and read the file again"
+                  onClick={() => {
+                    setConfirmReload(false);
+                    setReload((n) => n + 1);
+                  }}
+                >
+                  discard
+                </span>
+                <span
+                  className="text-[10px] text-outline cursor-pointer hover:text-on-surface"
+                  onClick={() => setConfirmReload(false)}
+                >
+                  keep
+                </span>
+              </>
+            ) : (
+              <span
+                className="material-symbols-outlined text-[14px] text-on-surface-variant hover:text-on-surface cursor-pointer"
+                title="Re-read from disk"
+                onClick={() =>
+                  saveState === "dirty"
+                    ? setConfirmReload(true)
+                    : setReload((n) => n + 1)
+                }
+              >
+                refresh
+              </span>
+            ))}
           {path && (
             <span
               className="material-symbols-outlined text-[14px] text-on-surface-variant hover:text-on-surface cursor-pointer"

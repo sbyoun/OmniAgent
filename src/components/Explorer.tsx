@@ -47,7 +47,17 @@ export function Explorer({
   } | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  /** The ⋯ menu: actions that do not need to be one click away. */
+  const [actions, setActions] = useState(false);
   const dragTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
+  useEffect(() => {
+    if (!actions) return;
+    const close = () => setActions(false);
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [actions]);
 
   useEffect(() => {
     if (!menu) return;
@@ -172,7 +182,11 @@ export function Explorer({
       const f = item.getAsFile();
       if (f) files.push(f);
     }
-    if (files.length === 0) return;
+    await uploadFiles(files);
+  };
+
+  const uploadFiles = async (files: File[]) => {
+    if (files.length === 0 || !cwd) return;
     setUploading(files.map((f) => f.name));
     try {
       for (const f of files) {
@@ -228,21 +242,66 @@ export function Explorer({
         >
           refresh
         </span>
-        <span
-          className={headerIcon}
-          title="New file"
-          onClick={() => setCreating("file")}
-        >
-          note_add
-        </span>
-        <span
-          className={headerIcon}
-          title="New folder"
-          onClick={() => setCreating("dir")}
-        >
-          create_new_folder
-        </span>
+        <div className="relative">
+          <span
+            className={headerIcon}
+            title="More"
+            onClick={(e) => {
+              e.stopPropagation();
+              setActions((v) => !v);
+            }}
+          >
+            more_horiz
+          </span>
+          {actions && (
+            <div
+              className="absolute right-0 top-5 z-50 min-w-40 py-1 rounded-md bg-surface-container-high border border-surface-container-highest shadow-lg text-[11px]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-surface-container-highest"
+                onClick={() => {
+                  setActions(false);
+                  fileRef.current?.click();
+                }}
+              >
+                Upload files…
+              </button>
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-surface-container-highest"
+                onClick={() => {
+                  setActions(false);
+                  setCreating("file");
+                }}
+              >
+                New file
+              </button>
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-surface-container-highest"
+                onClick={() => {
+                  setActions(false);
+                  setCreating("dir");
+                }}
+              >
+                New folder
+              </button>
+            </div>
+          )}
+        </div>
       </div>
+      {/* Dropping files does the same thing; this is for when they are not in
+          a window you can drag from. */}
+      <input
+        ref={fileRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          void uploadFiles(files);
+        }}
+      />
       {dragOver && (
         <div className="absolute inset-0 z-10 bg-surface/80 flex flex-col items-center justify-center gap-1 pointer-events-none">
           <span className="material-symbols-outlined text-[28px] text-primary">
