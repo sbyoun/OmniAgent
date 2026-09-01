@@ -20,6 +20,11 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 const socketDir = mkdtempSync(join(tmpdir(), "omniagent-test-"));
+// A test launched from inside OmniAgent inherits TMUX, whose socket path takes
+// precedence over TMUX_TMPDIR. Leaving it set makes the cleanup below kill the
+// user's real local tmux server instead of this test's isolated server.
+delete process.env.TMUX;
+delete process.env.TMUX_PANE;
 process.env.TMUX_TMPDIR = socketDir;
 
 const { spawnPty, killPty, listTmuxSessions, killTmuxSession } = await import(

@@ -162,6 +162,22 @@ function tmuxCommand(session: string, locale: string): string {
   );
 }
 
+/**
+ * tmux 3.0 and older do not understand `terminal-features` or `new-session -e`.
+ * Keep the session usable when the modern command is rejected: in particular,
+ * mouse mode must still be enabled or xterm translates the wheel into cursor
+ * keys and the shell walks through command history instead of scrolling.
+ */
+function legacyTmuxCommand(session: string): string {
+  const name = quote(session);
+  return (
+    `tmux -u new-session -A -s '${name}' \\; ` +
+    `set-option status off \\; set-option mouse on \\; ` +
+    `set-option set-titles on \\; ` +
+    `set-option set-titles-string '${TITLE_FORMAT}'`
+  );
+}
+
 export function spawnPty(
   sender: WebContents,
   id: string,
@@ -185,7 +201,7 @@ export function spawnPty(
   if (host) {
     const remote = session
       ? `${tmuxCommand(session, "en_US.UTF-8")} 2>/dev/null || ` +
-        `tmux -u new-session -A -s '${quote(session)}' 2>/dev/null || exec $SHELL -l`
+        `${legacyTmuxCommand(session)} 2>/dev/null || exec $SHELL -l`
       : "exec $SHELL -l";
     file = "ssh";
     args = ["-t", host, remote];
@@ -195,7 +211,9 @@ export function spawnPty(
       ? [
           "-l",
           "-c",
-          `command -v tmux >/dev/null 2>&1 && exec ${tmuxCommand(session, lang)} || exec "${file}" -l`,
+          `command -v tmux >/dev/null 2>&1 && ` +
+            `{ ${tmuxCommand(session, lang)} 2>/dev/null || ${legacyTmuxCommand(session)}; } ` +
+            `|| exec "${file}" -l`,
         ]
       : ["-l"];
   }

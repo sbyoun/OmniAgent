@@ -137,6 +137,18 @@ struct PtyExit {
 /// otherwise have to be doubled.
 const TITLE_FORMAT: &str = "oa:#{W:#{window_index}:#{=12:#{s/[|]/ /:window_name}}|,#{window_index}*:#{=12:#{s/[|]/ /:window_name}}|}";
 
+/// Compatibility path for tmux versions that reject `terminal-features` or
+/// `new-session -e` (notably tmux 3.0). These baseline options must be part of
+/// the fallback too: without mouse mode xterm turns the wheel into cursor keys
+/// and the shell walks through command history instead of scrolling.
+fn legacy_tmux_command(session: &str) -> String {
+    format!(
+        "tmux -u new-session -A -s '{}' \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}'",
+        session.replace('\'', ""),
+        title = TITLE_FORMAT
+    )
+}
+
 /// Spawn a PTY. `host: None` opens the local login shell; `Some(host)` runs
 /// `ssh -t <host>` attaching to (or creating) a tmux session per the SDD.
 /// For local pods, `session: Some(name)` wraps the shell in a named tmux
@@ -188,9 +200,9 @@ pub fn pty_spawn(
                     // was started with — and a server left over from a
                     // non-UTF-8 launch breaks multibyte (Hangul) input while
                     // the rest of the app looks fine.
-                    "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG en_US.UTF-8 \\; set-environment -g LC_CTYPE en_US.UTF-8 \\; new-session -A -s '{}' -e LANG=en_US.UTF-8 -e LC_CTYPE=en_US.UTF-8 \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || tmux -u new-session -A -s '{}' 2>/dev/null || exec $SHELL -l",
+                    "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG en_US.UTF-8 \\; set-environment -g LC_CTYPE en_US.UTF-8 \\; new-session -A -s '{}' -e LANG=en_US.UTF-8 -e LC_CTYPE=en_US.UTF-8 \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || {} 2>/dev/null || exec $SHELL -l",
                     name.replace('\'', ""),
-                    name.replace('\'', ""),
+                    legacy_tmux_command(name),
                     title = TITLE_FORMAT
                 ),
                 None => "exec $SHELL -l".to_string(),
@@ -211,8 +223,9 @@ pub fn pty_spawn(
                         "-l",
                         "-c",
                         &format!(
-                            "command -v tmux >/dev/null 2>&1 && exec tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG {lang} \\; set-environment -g LC_CTYPE {lang} \\; new-session -A -s '{}' -e LANG={lang} -e LC_CTYPE={lang} \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' || exec \"{}\" -l",
+                            "command -v tmux >/dev/null 2>&1 && {{ tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG {lang} \\; set-environment -g LC_CTYPE {lang} \\; new-session -A -s '{}' -e LANG={lang} -e LC_CTYPE={lang} \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || {}; }} || exec \"{}\" -l",
                             name.replace('\'', ""),
+                            legacy_tmux_command(name),
                             shell,
                             lang = &lang,
                             title = TITLE_FORMAT
