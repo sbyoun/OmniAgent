@@ -152,7 +152,7 @@ function tmuxCommand(session: string, locale: string): string {
     // why this looked like a shell-only bug.
     `tmux -u set-option -sg escape-time 0 \\; ` +
     `set-option -sq set-clipboard on \\; ` +
-    `set-option -saq terminal-features 'xterm-256color:clipboard' \\; ` +
+    `set-option -saq terminal-features 'xterm-256color:clipboard:RGB' \\; ` +
     `set-environment -g LANG ${locale} \\; ` +
     `set-environment -g LC_CTYPE ${locale} \\; ` +
     `new-session -A -s '${name}' -e LANG=${locale} -e LC_CTYPE=${locale} \\; ` +
@@ -218,17 +218,31 @@ export function spawnPty(
       : ["-l"];
   }
 
+  // A pod is an interactive terminal and must look like one, whatever launched
+  // the app. Started from a tool runner, the app inherits NO_COLOR=1,
+  // FORCE_COLOR=0 and TERM=dumb — meant to keep captured output plain — and
+  // every pod would then hand those to its shell, so the agents inside ran
+  // monochrome. Remote pods escaped it only because ssh builds the environment
+  // fresh on the server. Mirror image of the locale problem: there the app
+  // inherited too little, here too much.
+  const env = { ...process.env } as Record<string, string>;
+  delete env.NO_COLOR;
+  delete env.FORCE_COLOR;
+
   const proc = pty.spawn(file, args, {
     name: "xterm-256color",
     cols,
     rows,
     cwd: homedir(),
     env: {
-      ...process.env,
+      ...env,
       TERM: "xterm-256color",
+      // xterm.js renders 24-bit colour; saying so is the truth, and tmux needs
+      // to hear it too (see RGB in the terminal-features below).
+      COLORTERM: "truecolor",
       LANG: lang,
       LC_CTYPE: lang,
-    } as Record<string, string>,
+    },
   });
 
   const isCurrent = () => generations.get(id) === generation;

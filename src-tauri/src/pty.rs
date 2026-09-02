@@ -200,7 +200,7 @@ pub fn pty_spawn(
                     // was started with — and a server left over from a
                     // non-UTF-8 launch breaks multibyte (Hangul) input while
                     // the rest of the app looks fine.
-                    "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG en_US.UTF-8 \\; set-environment -g LC_CTYPE en_US.UTF-8 \\; new-session -A -s '{}' -e LANG=en_US.UTF-8 -e LC_CTYPE=en_US.UTF-8 \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || {} 2>/dev/null || exec $SHELL -l",
+                    "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard:RGB' \\; set-environment -g LANG en_US.UTF-8 \\; set-environment -g LC_CTYPE en_US.UTF-8 \\; new-session -A -s '{}' -e LANG=en_US.UTF-8 -e LC_CTYPE=en_US.UTF-8 \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || {} 2>/dev/null || exec $SHELL -l",
                     name.replace('\'', ""),
                     legacy_tmux_command(name),
                     title = TITLE_FORMAT
@@ -223,7 +223,7 @@ pub fn pty_spawn(
                         "-l",
                         "-c",
                         &format!(
-                            "command -v tmux >/dev/null 2>&1 && {{ tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard' \\; set-environment -g LANG {lang} \\; set-environment -g LC_CTYPE {lang} \\; new-session -A -s '{}' -e LANG={lang} -e LC_CTYPE={lang} \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || {}; }} || exec \"{}\" -l",
+                            "command -v tmux >/dev/null 2>&1 && {{ tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard:RGB' \\; set-environment -g LANG {lang} \\; set-environment -g LC_CTYPE {lang} \\; new-session -A -s '{}' -e LANG={lang} -e LC_CTYPE={lang} \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || {}; }} || exec \"{}\" -l",
                             name.replace('\'', ""),
                             legacy_tmux_command(name),
                             shell,
@@ -239,7 +239,19 @@ pub fn pty_spawn(
             c
         }
     };
+    // A pod is an interactive terminal and must look like one, whatever
+    // launched the app. Started from a tool runner, the app inherits
+    // NO_COLOR=1, FORCE_COLOR=0 and TERM=dumb — meant to keep captured output
+    // plain — and every pod would hand those to its shell, so the agents
+    // inside ran monochrome. Remote pods escaped it only because ssh builds
+    // the environment fresh on the server. Mirror image of the locale
+    // problem: there the app inherited too little, here too much.
+    cmd.env_remove("NO_COLOR");
+    cmd.env_remove("FORCE_COLOR");
     cmd.env("TERM", "xterm-256color");
+    // xterm.js renders 24-bit colour; saying so is the truth, and tmux needs
+    // to hear it too (see RGB in the terminal-features above).
+    cmd.env("COLORTERM", "truecolor");
     cmd.env("LANG", &lang);
     cmd.env("LC_CTYPE", &lang);
     if let Some(home) = dirs::home_dir() {
