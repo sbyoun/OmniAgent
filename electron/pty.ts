@@ -51,8 +51,13 @@ export function listTmuxSessions(
   host: string | null,
 ): Promise<{ machine: string; sessions: TmuxSession[] }> {
   // Both answers in one round trip; the machine id comes first.
+  //
+  // `-u` is not optional. tmux sanitizes what it prints for a client it does
+  // not consider UTF-8, and a GUI launch carries no LANG, so every tab below
+  // came back as `_` — the sidebar then showed one field, "pod-1_1788503692_1_1",
+  // and killing that name found nothing to kill.
   const query = `${MACHINE_ID}
-tmux ls -F '#{session_name}\t#{session_created}\t#{session_attached}\t#{session_windows}' 2>/dev/null`;
+tmux -u ls -F '#{session_name}\t#{session_created}\t#{session_attached}\t#{session_windows}' 2>/dev/null`;
   const [file, args] = host
     ? (["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, query]] as const)
     : (["sh", ["-c", query]] as const);

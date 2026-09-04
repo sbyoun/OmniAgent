@@ -56,7 +56,9 @@ pub struct TmuxSession {
 pub async fn tmux_sessions(host: Option<String>) -> SessionList {
     // Both answers in one round trip; the machine id comes first.
     let query = format!(
-        "{MACHINE_ID}\ntmux ls -F '#{{session_name}}\t#{{session_created}}\t#{{session_attached}}\t#{{session_windows}}' 2>/dev/null"
+        // `-u`: tmux rewrites tabs as `_` for a non-UTF-8 client, and a GUI
+        // launch has no LANG — the four fields then arrived as one name.
+        "{MACHINE_ID}\ntmux -u ls -F '#{{session_name}}\t#{{session_created}}\t#{{session_attached}}\t#{{session_windows}}' 2>/dev/null"
     );
     let out = match host {
         None => std::process::Command::new("sh")
