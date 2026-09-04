@@ -196,26 +196,39 @@ export function spawnPty(
   const generation = nextGeneration++;
   generations.set(id, generation);
 
+  // A guest attaches and nothing more. `new-session -A` would recreate the
+  // session the moment it was gone — so a guest pod left in the layout kept
+  // resurrecting a session the user had just killed, with an empty shell in
+  // it. Attach only, and exit when there is nothing to attach to; the pod
+  // then closes and drops out of the layout on its own.
+  const attachOnly = (name: string) =>
+    `tmux -u attach-session -t '=${quote(name)}' || ` +
+    `{ echo 'tmux session ${quote(name)} is gone'; exit 1; }`;
+
   let file: string;
   let args: string[];
   if (host) {
-    const remote = session
-      ? `${tmuxCommand(session, "en_US.UTF-8")} 2>/dev/null || ` +
-        `${legacyTmuxCommand(session)} 2>/dev/null || exec $SHELL -l`
-      : "exec $SHELL -l";
+    const remote = !session
+      ? "exec $SHELL -l"
+      : !ownsSession
+        ? attachOnly(session)
+        : `${tmuxCommand(session, "en_US.UTF-8")} 2>/dev/null || ` +
+          `${legacyTmuxCommand(session)} 2>/dev/null || exec $SHELL -l`;
     file = "ssh";
     args = ["-t", host, remote];
   } else {
     file = process.env.SHELL || "/bin/zsh";
-    args = session
-      ? [
-          "-l",
-          "-c",
-          `command -v tmux >/dev/null 2>&1 && ` +
-            `{ ${tmuxCommand(session, lang)} 2>/dev/null || ${legacyTmuxCommand(session)}; } ` +
-            `|| exec "${file}" -l`,
-        ]
-      : ["-l"];
+    args = !session
+      ? ["-l"]
+      : !ownsSession
+        ? ["-l", "-c", attachOnly(session)]
+        : [
+            "-l",
+            "-c",
+            `command -v tmux >/dev/null 2>&1 && ` +
+              `{ ${tmuxCommand(session, lang)} 2>/dev/null || ${legacyTmuxCommand(session)}; } ` +
+              `|| exec "${file}" -l`,
+          ];
   }
 
   // A pod is an interactive terminal and must look like one, whatever launched

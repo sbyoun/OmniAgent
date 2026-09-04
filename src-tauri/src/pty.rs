@@ -193,7 +193,16 @@ pub fn pty_spawn(
             // no UTF-8 locale set.
             // `set-option mouse on`: wheel scrolls tmux scrollback instead of
             // being translated into arrow keys (shell history).
+            // A guest attaches and nothing more: `new-session -A` would
+            // recreate a session the user had just killed, with an empty
+            // shell in it. Exit when there is nothing to attach to; the pod
+            // then closes and drops out of the layout on its own.
+            let guest = owns_session == Some(false);
             let remote_cmd = match &session {
+                Some(name) if guest => format!(
+                    "tmux -u attach-session -t '={0}' || {{ echo 'tmux session {0} is gone'; exit 1; }}",
+                    name.replace('\'', "")
+                ),
                 Some(name) => format!(
                     // `-e` pins the locale on the SESSION. Without it the
                     // shell inherits whatever environment the tmux *server*
@@ -215,6 +224,16 @@ pub fn pty_spawn(
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
             let mut c = CommandBuilder::new(&shell);
             match &session {
+                Some(name) if owns_session == Some(false) => {
+                    c.args([
+                        "-l",
+                        "-c",
+                        &format!(
+                            "tmux -u attach-session -t '={0}' || {{ echo 'tmux session {0} is gone'; exit 1; }}",
+                            name.replace('\'', "")
+                        ),
+                    ]);
+                }
                 // Attach-or-create a named tmux session so the pod's content
                 // survives app restarts; fall back to a plain shell when tmux
                 // is not installed.
