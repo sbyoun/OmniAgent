@@ -2,6 +2,8 @@ use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::local;
+
 #[derive(Serialize, Clone, Debug)]
 pub struct SshHost {
     pub host: String,
@@ -14,13 +16,28 @@ fn config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".ssh").join("config"))
 }
 
+/// The `~/.ssh/config` whose hosts this app can actually reach.
+///
+/// On macOS and Linux that is this user's, read straight off the disk. On
+/// Windows it is the distro's: pods run their `ssh` inside WSL, so Win32's
+/// `C:\Users\you\.ssh\config` — and the keys beside it — are not the ones
+/// that will be used, and listing hosts from it would offer the user a fleet
+/// that fails to connect.
+fn read_ssh_config() -> Option<String> {
+    if local::LOCAL_IS_WSL {
+        let out = local::shell_command(None, "cat ~/.ssh/config").output().ok()?;
+        return out
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).to_string());
+    }
+    fs::read_to_string(config_path()?).ok()
+}
+
 /// Parse ~/.ssh/config into a list of concrete Host entries.
 /// Wildcard patterns (`*`, `?`) are skipped since they are not directly connectable.
 pub fn parse_ssh_config() -> Vec<SshHost> {
-    let Some(path) = config_path() else {
-        return Vec::new();
-    };
-    let Ok(content) = fs::read_to_string(&path) else {
+    let Some(content) = read_ssh_config() else {
         return Vec::new();
     };
     parse(&content)

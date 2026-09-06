@@ -1,13 +1,19 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { LOCAL_IS_WSL, onLocalMachine, run, SSH_OPTS } from "./local";
 
 /**
  * Where the layout lives. Both shells write the same path on purpose: the
  * webview's own storage is per-engine, so a layout saved in one build would be
  * invisible to the other even though the tmux sessions behind the pods are
  * shared.
+ *
+ * This one stays on the Windows side of the fence rather than in the distro,
+ * unlike everything else here: it is the app's own state, not the user's work,
+ * and both shells are Win32 processes reading it before a pod exists — so
+ * Windows is the place they can both reach without waking WSL first.
  */
 const LAYOUT_FILE = join(homedir(), ".config", "omniagent", "layout.json");
 
@@ -41,37 +47,24 @@ export interface HostStats {
 /** Quote a path for use inside a remote shell command. */
 const shellQuote = (path: string) => `'${path.replace(/'/g, `'\\''`)}'`;
 
-const SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10"];
+/**
+ * Whether `host: null` can be answered by this process's own filesystem.
+ *
+ * On macOS and Linux it always can, and every local call below is the plain
+ * `fs` call it has always been. On Windows it never can: the local machine is
+ * the WSL distro, and `/home/you/project` is not a path Win32 can open. Those
+ * take the same command path as a remote host — `ls`, `cat`, `mkdir` — with
+ * wsl.exe standing in for ssh, which is why `run` accepts a null host at all.
+ */
+const ownFs = (host: string | null) => !host && !LOCAL_IS_WSL;
 
-/** Run a command on the host, resolving with stdout or rejecting with stderr. */
-function ssh(host: string, command: string, encoding: "utf8"): Promise<string>;
-function ssh(host: string, command: string, encoding: "buffer"): Promise<Buffer>;
-function ssh(
-  host: string,
-  command: string,
-  encoding: "utf8" | "buffer",
-): Promise<string | Buffer> {
+/** Pipe `data` into a command's stdin, on the host or on the local machine. */
+function pipe(host: string | null, command: string, data: Buffer): Promise<void> {
+  const [file, args] = host
+    ? onLocalMachine("ssh", [...SSH_OPTS, host, command])
+    : onLocalMachine("sh", ["-c", command]);
   return new Promise((resolve, reject) => {
-    execFile(
-      "ssh",
-      [...SSH_OPTS, host, command],
-      { encoding: encoding === "buffer" ? "buffer" : "utf8", maxBuffer: 64 * 1024 * 1024 },
-      (err, stdout, stderr) => {
-        if (err) {
-          const message = stderr?.toString().trim() || err.message;
-          reject(new Error(message));
-          return;
-        }
-        resolve(stdout as string | Buffer);
-      },
-    );
-  });
-}
-
-/** Pipe `data` into a command's stdin on the host. */
-function sshPipe(host: string, command: string, data: Buffer): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const child = spawn("ssh", [...SSH_OPTS, host, command]);
+    const child = spawn(file, args);
     let stderr = "";
     child.stderr.on("data", (chunk) => (stderr += chunk));
     child.on("error", reject);
@@ -92,7 +85,7 @@ const sortEntries = (entries: DirEntry[]) =>
  * one-shot `ssh <host> ls` — connect only when the explorer opens.
  */
 export async function listDir(host: string | null, path: string): Promise<DirEntry[]> {
-  if (!host) {
+  if (ownFs(host)) {
     const names = await fs.readdir(path);
     const entries = await Promise.all(
       names.map(async (name) => ({
@@ -108,7 +101,7 @@ export async function listDir(host: string | null, path: string): Promise<DirEnt
     return sortEntries(entries);
   }
   // -L dereferences symlinks so linked directories get the `/` marker from -p.
-  const out = await ssh(host, `ls -1ALp ${shellQuote(path)}`, "utf8");
+  const out = await run(host, `ls -1ALp ${shellQuote(path)}`, "utf8");
   return sortEntries(
     out
       .split("\n")
@@ -121,8 +114,8 @@ export async function listDir(host: string | null, path: string): Promise<DirEnt
 }
 
 export async function readFile(host: string | null, path: string): Promise<string> {
-  if (!host) return fs.readFile(path, "utf8");
-  return ssh(host, `cat ${shellQuote(path)}`, "utf8");
+  if (ownFs(host)) return fs.readFile(path, "utf8");
+  return run(host, `cat ${shellQuote(path)}`, "utf8");
 }
 
 export async function writeFile(
@@ -130,24 +123,24 @@ export async function writeFile(
   path: string,
   content: string,
 ): Promise<void> {
-  if (!host) return fs.writeFile(path, content);
-  return sshPipe(host, `cat > ${shellQuote(path)}`, Buffer.from(content));
+  if (ownFs(host)) return fs.writeFile(path, content);
+  return pipe(host, `cat > ${shellQuote(path)}`, Buffer.from(content));
 }
 
 export async function mkdir(host: string | null, path: string): Promise<void> {
-  if (!host) return fs.mkdir(path);
-  await ssh(host, `mkdir ${shellQuote(path)}`, "utf8");
+  if (ownFs(host)) return fs.mkdir(path);
+  await run(host, `mkdir ${shellQuote(path)}`, "utf8");
 }
 
 export async function createFile(host: string | null, path: string): Promise<void> {
-  if (!host) {
+  if (ownFs(host)) {
     // wx fails if the path exists, so an existing file is never truncated.
     const handle = await fs.open(path, "wx");
     await handle.close();
     return;
   }
   const q = shellQuote(path);
-  await ssh(host, `test -e ${q} && echo EXISTS >&2 && exit 1; touch ${q}`, "utf8");
+  await run(host, `test -e ${q} && echo EXISTS >&2 && exit 1; touch ${q}`, "utf8");
 }
 
 /** Upload raw bytes dropped onto the explorer. */
@@ -157,18 +150,23 @@ export async function upload(
   data: Uint8Array,
 ): Promise<void> {
   const buffer = Buffer.from(data);
-  if (!host) return fs.writeFile(path, buffer);
-  return sshPipe(host, `cat > ${shellQuote(path)}`, buffer);
+  if (ownFs(host)) return fs.writeFile(path, buffer);
+  return pipe(host, `cat > ${shellQuote(path)}`, buffer);
 }
 
 async function readBytes(host: string | null, path: string): Promise<Buffer> {
-  if (!host) return fs.readFile(path);
-  return ssh(host, `cat ${shellQuote(path)}`, "buffer");
+  if (ownFs(host)) return fs.readFile(path);
+  return run(host, `cat ${shellQuote(path)}`, "buffer");
 }
 
 /**
  * Copy a file into ~/Downloads (fetching it over ssh for remote pods) and
  * return the saved path. Never overwrites: collisions get ` (2)`, ` (3)`…
+ *
+ * The destination is deliberately the one the *desktop* calls Downloads, so on
+ * Windows the file lands in `C:\Users\…\Downloads` where Explorer and the
+ * browser look for it — a download nobody can find is not a download. Only the
+ * fetch reaches into the distro.
  */
 export async function download(host: string | null, path: string): Promise<string> {
   const dir = join(homedir(), "Downloads");
@@ -213,7 +211,7 @@ export async function readBase64(host: string | null, path: string): Promise<str
  * in the terminal opens in the explorer or the editor.
  */
 export async function stat(host: string | null, path: string): Promise<PathInfo> {
-  if (!host) {
+  if (ownFs(host)) {
     try {
       const s = await fs.stat(path);
       return { exists: true, is_dir: s.isDirectory() };
@@ -223,7 +221,7 @@ export async function stat(host: string | null, path: string): Promise<PathInfo>
   }
   const q = shellQuote(path);
   const kind = (
-    await ssh(
+    await run(
       host,
       `if [ -d ${q} ]; then echo dir; elif [ -e ${q} ]; then echo file; else echo none; fi`,
       "utf8",
@@ -234,8 +232,8 @@ export async function stat(host: string | null, path: string): Promise<PathInfo>
 
 /** Default working directory for a pod's explorer. */
 export async function homeDir(host: string | null): Promise<string> {
-  if (!host) return homedir();
-  return (await ssh(host, "echo $HOME", "utf8")).trim();
+  if (ownFs(host)) return homedir();
+  return (await run(host, "echo $HOME", "utf8")).trim();
 }
 
 /**
@@ -243,6 +241,10 @@ export async function homeDir(host: string | null): Promise<string> {
  * macOS (top/vm_stat) and Linux (/proc), so the same call works for local and
  * ssh pods. Used memory leaves out cached files: on macOS that is Activity
  * Monitor's "Memory Used" (app + wired + compressed), on Linux MemAvailable.
+ *
+ * A Windows local pod takes the Linux arm, and reports the distro's numbers —
+ * which is the honest answer, since the distro is the machine whose CPU the
+ * agents in that pod are burning.
  */
 const STATS_SNIPPET = `ID=$(cat /etc/machine-id 2>/dev/null)
 [ -z "$ID" ] && ID=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')
@@ -264,13 +266,7 @@ echo "$C $((MT-MA)) $MT"
 fi`;
 
 export async function hostStats(host: string | null): Promise<HostStats> {
-  const out = host
-    ? await ssh(host, STATS_SNIPPET, "utf8")
-    : await new Promise<string>((resolve, reject) =>
-        execFile("sh", ["-c", STATS_SNIPPET], (err, stdout, stderr) =>
-          err ? reject(new Error(stderr || err.message)) : resolve(stdout),
-        ),
-      );
+  const out = await run(host, STATS_SNIPPET, "utf8");
   const lines = out.trim().split("\n");
   const [cpu, used, total] = (lines.pop() ?? "").trim().split(/\s+/).map(Number);
   return {

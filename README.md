@@ -116,10 +116,41 @@ Building the Tauri shell also needs [Rust](https://rustup.rs).
 On first launch the sidebar lists every concrete `Host` from your
 `~/.ssh/config`. Click one (or *Local Terminal*) to launch a pod.
 
+### On Windows
+
+A local pod is a pod in your WSL distro — the distro is the machine. Its `~`,
+its files, its `tmux ls`, and its `~/.ssh/config` are the ones you get, because
+the `ssh` that runs is the one with the keys next to it. Nothing to configure
+if `wsl.exe` starts your default distro; set `OMNIAGENT_WSL_DISTRO` to pick
+another. Downloads and the saved layout stay on the Windows side, where
+Explorer can find them.
+
+Develop in WSL, build in Windows. `node_modules` holds per-platform binaries,
+so one directory cannot serve both — keep a Windows-side copy for building, and
+never run `npm ci` against the WSL path from PowerShell.
+
+```bash
+# WSL — push the source to the Windows-side build directory
+rsync -a --delete \
+  --exclude node_modules --exclude dist --exclude dist-electron \
+  --exclude dist-test --exclude release --exclude src-tauri/target \
+  ~/path/to/OmniAgent/ /mnt/c/path/to/OmniAgent/
+```
+
+```powershell
+# PowerShell — build the installer
+cd C:\path\to\OmniAgent
+npm ci                 # first time, and whenever dependencies change
+npm run package:win    # → release\OmniAgent-electron-<version>-x64.exe
+```
+
+Take the Electron build on Windows; the Tauri shell has not been brought across
+yet.
+
 ## Status & roadmap
 
-Early but functional — built and daily-driven on macOS. Windows/Linux are
-untested.
+Early but functional — built and daily-driven on macOS. Linux is untested.
+Windows runs its pods through WSL, and is newer than the rest.
 
 Development is tracked on the [issue tracker](https://github.com/sbyoun/OmniAgent/issues)
 and grouped into [milestones](https://github.com/sbyoun/OmniAgent/milestones):

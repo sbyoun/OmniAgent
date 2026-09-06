@@ -2,6 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { homedir } from "node:os";
 import * as pty from "node-pty";
 import type { WebContents } from "electron";
+import { LOCAL_IS_WSL, onLocalMachine, shellArgv, SSH_OPTS, toolPath } from "./local";
 
 interface Instance {
   proc: pty.IPty;
@@ -58,13 +59,11 @@ export function listTmuxSessions(
   // and killing that name found nothing to kill.
   const query = `${MACHINE_ID}
 tmux -u ls -F '#{session_name}\t#{session_created}\t#{session_attached}\t#{session_windows}' 2>/dev/null`;
-  const [file, args] = host
-    ? (["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, query]] as const)
-    : (["sh", ["-c", query]] as const);
+  const [file, args] = shellArgv(host, query);
   return new Promise((resolve) => {
     execFile(
       file,
-      args as string[],
+      args,
       { env: { ...process.env, PATH: toolPath } },
       (_err, stdout) => {
         const [machine = "", ...lines] = stdout.split("\n");
@@ -93,9 +92,6 @@ const instances = new Map<string, Instance>();
  */
 const generations = new Map<string, number>();
 let nextGeneration = 1;
-
-/** PATH for helper commands — a GUI launch inherits almost nothing. */
-const toolPath = `${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`;
 
 /**
  * A UTF-8 locale, keeping the user's when it already is one. A tmux client
@@ -210,17 +206,58 @@ export function spawnPty(
     `tmux -u attach-session -t '=${quote(name)}' || ` +
     `{ echo 'tmux session ${quote(name)} is gone'; exit 1; }`;
 
-  let file: string;
-  let args: string[];
-  if (host) {
-    const remote = !session
+  /**
+   * What a POSIX login shell somewhere else runs to become this pod.
+   *
+   * Used for ssh pods, and on Windows for local ones too — there the local
+   * machine is a WSL distro, which is "somewhere else" in every way that
+   * matters here: the app cannot read its `$SHELL`, so the command has to ask
+   * for it on the far side, exactly as the remote case already did.
+   */
+  const elsewhere = (locale: string) =>
+    !session
       ? "exec $SHELL -l"
       : !ownsSession
         ? attachOnly(session)
-        : `${tmuxCommand(session, "en_US.UTF-8")} 2>/dev/null || ` +
+        : `${tmuxCommand(session, locale)} 2>/dev/null || ` +
           `${legacyTmuxCommand(session)} 2>/dev/null || exec $SHELL -l`;
-    file = "ssh";
-    args = ["-t", host, remote];
+
+  let file: string;
+  let args: string[];
+  if (host) {
+    [file, args] = onLocalMachine("ssh", ["-t", host, elsewhere("en_US.UTF-8")]);
+  } else if (LOCAL_IS_WSL) {
+    // A local pod on Windows is a WSL pod: the same command an ssh pod sends
+    // to a server, carried by wsl.exe instead. `sh -l` only launches it —
+    // tmux starts the user's real shell from /etc/passwd inside the session,
+    // and that is the shell the pod actually feels like.
+    //
+    // TERM and the locale are exported by the command rather than handed to
+    // node-pty below, because a Windows environment variable does not cross
+    // into the distro: WSL forwards only what WSLENV names it, and a pod that
+    // silently lost its locale is the exact failure this file spends most of
+    // its comments on. The `cd` is there for the same reason — wsl.exe starts
+    // in the translation of the Windows working directory, which is
+    // `/mnt/c/Users/...` and nobody's home.
+    //
+    // The locale is chosen INSIDE the distro, and this is the one place that
+    // must not do what the ssh branch does. `en_US.UTF-8` is a fair bet on a
+    // server; on a WSL distro it is usually absent — a stock Ubuntu generates
+    // only `C`, `C.utf8` and `POSIX`. Naming a locale that was never generated
+    // does not fall back quietly: glibc drops to `C` collation while the
+    // variables still claim UTF-8, and a zsh config doing anything with
+    // character ranges dies with "character not in range", taking the user's
+    // prompt down to the `%m%#` fallback — a shell with no path in it. So keep
+    // whatever UTF-8 locale the distro already has, and only impose one when
+    // it has none. `$LANG` reaches tmux as a shell expansion, which is why the
+    // locale is passed down quoted.
+    [file, args] = onLocalMachine("sh", [
+      "-lc",
+      `cd "$HOME" 2>/dev/null; ` +
+        `case "\${LANG:-}" in *[Uu][Tt][Ff]*) ;; *) LANG=C.UTF-8 ;; esac; ` +
+        `export TERM=xterm-256color COLORTERM=truecolor LANG LC_CTYPE="$LANG"; ` +
+        elsewhere('"$LANG"'),
+    ]);
   } else {
     file = process.env.SHELL || "/bin/zsh";
     args = !session
@@ -311,13 +348,11 @@ export function renameTmuxSession(
   to: string,
 ): Promise<boolean> {
   const command = `tmux rename-session -t '${quote(from)}' '${quote(to)}'`;
-  const [file, args] = host
-    ? (["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command]] as const)
-    : (["sh", ["-c", command]] as const);
+  const [file, args] = shellArgv(host, command);
   return new Promise((resolve) => {
     execFile(
       file,
-      args as string[],
+      args,
       { env: { ...process.env, PATH: toolPath } },
       (err) => resolve(!err),
     );
@@ -327,13 +362,11 @@ export function renameTmuxSession(
 /** End a session from the sessions list, whoever started it. */
 export function killTmuxSession(host: string | null, name: string): Promise<void> {
   const command = `tmux kill-session -t '${quote(name)}'`;
-  const [file, args] = host
-    ? (["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command]] as const)
-    : (["sh", ["-c", command]] as const);
+  const [file, args] = shellArgv(host, command);
   return new Promise((resolve) => {
     execFile(
       file,
-      args as string[],
+      args,
       { env: { ...process.env, PATH: toolPath } },
       () => resolve(),
     );
@@ -358,13 +391,11 @@ export function selectTmuxWindow(
   index: number,
 ): Promise<void> {
   const command = `tmux select-window -t '${quote(session)}:${Math.trunc(index)}'`;
-  const [file, args] = host
-    ? (["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, command]] as const)
-    : (["sh", ["-c", command]] as const);
+  const [file, args] = shellArgv(host, command);
   return new Promise((resolve) => {
     execFile(
       file,
-      args as string[],
+      args,
       { env: { ...process.env, PATH: toolPath } },
       () => resolve(),
     );
@@ -389,20 +420,13 @@ export function killPty(id: string): void {
 
   if (!inst.session || !inst.ownsSession) return;
   const name = quote(inst.session);
-  if (inst.host) {
-    spawn("ssh", [
-      "-o",
-      "BatchMode=yes",
-      "-o",
-      "ConnectTimeout=10",
-      inst.host,
-      `tmux kill-session -t '${name}'`,
-    ]).unref();
-  } else {
-    spawn("tmux", ["kill-session", "-t", name], {
-      env: { ...process.env, PATH: toolPath },
-    }).unref();
-  }
+  // Only the local `tmux` needs the Homebrew prefixes a GUI launch did not
+  // inherit; `ssh` is on the system PATH wherever this runs.
+  const [file, args] = inst.host
+    ? onLocalMachine("ssh", [...SSH_OPTS, inst.host, `tmux kill-session -t '${name}'`])
+    : onLocalMachine("tmux", ["kill-session", "-t", name]);
+  const options = inst.host ? {} : { env: { ...process.env, PATH: toolPath } };
+  spawn(file, args, options).unref();
 }
 
 /**
@@ -441,13 +465,11 @@ export function tmuxSessionStarted(
   session: string,
 ): Promise<number | null> {
   const query = `tmux display -p -t '${quote(session)}' '#{session_created}' 2>/dev/null`;
-  const [file, args] = host
-    ? (["ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, query]] as const)
-    : (["sh", ["-c", query]] as const);
+  const [file, args] = shellArgv(host, query);
   return new Promise((resolve) => {
     execFile(
       file,
-      args as string[],
+      args,
       { env: { ...process.env, PATH: toolPath } },
       (_err, stdout) => {
         const seconds = Number.parseInt(stdout.trim(), 10);

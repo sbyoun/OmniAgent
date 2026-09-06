@@ -80,8 +80,9 @@ jobs:
             args: --target x86_64-apple-darwin
           - platform: ubuntu-22.04
             args: ""
-          # Windows builds and runs, but the local shell spawner is unix-only
-          # (SSH pods work). Shipped so the artifact exists for testing.
+          # Windows reaches its tmux through WSL — see "the local machine is
+          # WSL" in the README. The runner has no distro, so this job only
+          # proves the build; the pods are exercised on a real machine.
           - platform: windows-latest
             args: ""
     runs-on: ${{ matrix.platform }}

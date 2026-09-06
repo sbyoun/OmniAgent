@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::local;
+
 pub struct PtyInstance {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
@@ -60,23 +62,7 @@ pub async fn tmux_sessions(host: Option<String>) -> SessionList {
         // launch has no LANG — the four fields then arrived as one name.
         "{MACHINE_ID}\ntmux -u ls -F '#{{session_name}}\t#{{session_created}}\t#{{session_attached}}\t#{{session_windows}}' 2>/dev/null"
     );
-    let out = match host {
-        None => std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&query)
-            .env(
-                "PATH",
-                format!(
-                    "{}:/opt/homebrew/bin:/usr/local/bin",
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
-            .output(),
-        Some(h) => std::process::Command::new("ssh")
-            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
-            .arg(&query)
-            .output(),
-    };
+    let out = local::shell_command(host.as_deref(), &query).output();
     let Ok(out) = out else {
         return SessionList { machine: String::new(), sessions: Vec::new() };
     };
@@ -184,81 +170,119 @@ pub fn pty_spawn(
         .ok()
         .filter(|l| l.to_ascii_uppercase().contains("UTF"))
         .unwrap_or_else(|| "en_US.UTF-8".into());
-    let mut cmd = match &host {
-        Some(h) => {
-            // Each pod gets its OWN named session on the server — opening a
-            // host twice must create two independent sessions, never mirror
-            // one. Falls back to a plain login shell when tmux is missing.
-            // `\; set-option status off`: the pod header already shows
-            // connection state, so hide tmux's own status bar.
-            // `-u` forces UTF-8 handling even when the login environment has
-            // no UTF-8 locale set.
-            // `set-option mouse on`: wheel scrolls tmux scrollback instead of
-            // being translated into arrow keys (shell history).
-            // A guest attaches and nothing more: `new-session -A` would
-            // recreate a session the user had just killed, with an empty
-            // shell in it. Exit when there is nothing to attach to; the pod
-            // then closes and drops out of the layout on its own.
-            let guest = owns_session == Some(false);
-            let remote_cmd = match &session {
-                Some(name) if guest => format!(
-                    "tmux -u attach-session -t '={0}' || {{ echo 'tmux session {0} is gone'; exit 1; }}",
-                    name.replace('\'', "")
-                ),
-                Some(name) => format!(
-                    // `-e` pins the locale on the SESSION. Without it the
-                    // shell inherits whatever environment the tmux *server*
-                    // was started with — and a server left over from a
-                    // non-UTF-8 launch breaks multibyte (Hangul) input while
-                    // the rest of the app looks fine.
-                    "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard:RGB' \\; set-environment -g LANG en_US.UTF-8 \\; set-environment -g LC_CTYPE en_US.UTF-8 \\; new-session -A -s '{}' -e LANG=en_US.UTF-8 -e LC_CTYPE=en_US.UTF-8 \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || {} 2>/dev/null || exec $SHELL -l",
-                    name.replace('\'', ""),
-                    legacy_tmux_command(name),
-                    title = TITLE_FORMAT
-                ),
-                None => "exec $SHELL -l".to_string(),
-            };
-            let mut c = CommandBuilder::new("ssh");
-            c.args(["-t", h, &remote_cmd]);
-            c
-        }
-        None => {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-            let mut c = CommandBuilder::new(&shell);
-            match &session {
-                Some(name) if owns_session == Some(false) => {
-                    c.args([
-                        "-l",
-                        "-c",
-                        &format!(
-                            "tmux -u attach-session -t '={0}' || {{ echo 'tmux session {0} is gone'; exit 1; }}",
-                            name.replace('\'', "")
-                        ),
-                    ]);
-                }
-                // Attach-or-create a named tmux session so the pod's content
-                // survives app restarts; fall back to a plain shell when tmux
-                // is not installed.
-                Some(name) => {
-                    c.args([
-                        "-l",
-                        "-c",
-                        &format!(
-                            "command -v tmux >/dev/null 2>&1 && {{ tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard:RGB' \\; set-environment -g LANG {lang} \\; set-environment -g LC_CTYPE {lang} \\; new-session -A -s '{}' -e LANG={lang} -e LC_CTYPE={lang} \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || {}; }} || exec \"{}\" -l",
-                            name.replace('\'', ""),
-                            legacy_tmux_command(name),
-                            shell,
-                            lang = &lang,
-                            title = TITLE_FORMAT
-                        ),
-                    ]);
-                }
-                None => {
-                    c.arg("-l");
-                }
+    // What a POSIX login shell somewhere else runs to become this pod.
+    //
+    // Each pod gets its OWN named session — opening a host twice must create
+    // two independent sessions, never mirror one. Falls back to a plain login
+    // shell when tmux is missing. `\; set-option status off`: the pod header
+    // already shows connection state, so hide tmux's own status bar. `-u`
+    // forces UTF-8 handling even when the login environment has no UTF-8
+    // locale set. `set-option mouse on`: wheel scrolls tmux scrollback instead
+    // of being translated into arrow keys (shell history). A guest attaches
+    // and nothing more: `new-session -A` would recreate a session the user had
+    // just killed, with an empty shell in it. Exit when there is nothing to
+    // attach to; the pod then closes and drops out of the layout on its own.
+    //
+    // Used for ssh pods, and on Windows for local ones too — there the local
+    // machine is a WSL distro, which is "somewhere else" in every way that
+    // matters here: the app cannot read its `$SHELL`, so the command has to
+    // ask for it on the far side, exactly as the remote case already did.
+    let guest = owns_session == Some(false);
+    let elsewhere = |locale: &str| match &session {
+        Some(name) if guest => format!(
+            "tmux -u attach-session -t '={0}' || {{ echo 'tmux session {0} is gone'; exit 1; }}",
+            name.replace('\'', "")
+        ),
+        Some(name) => format!(
+            // `-e` pins the locale on the SESSION. Without it the shell
+            // inherits whatever environment the tmux *server* was started
+            // with — and a server left over from a non-UTF-8 launch breaks
+            // multibyte (Hangul) input while the rest of the app looks fine.
+            "tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard:RGB' \\; set-environment -g LANG {locale} \\; set-environment -g LC_CTYPE {locale} \\; new-session -A -s '{}' -e LANG={locale} -e LC_CTYPE={locale} \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || {} 2>/dev/null || exec $SHELL -l",
+            name.replace('\'', ""),
+            legacy_tmux_command(name),
+            locale = locale,
+            title = TITLE_FORMAT
+        ),
+        None => "exec $SHELL -l".to_string(),
+    };
+
+    /// Build a pty command line from an argv `local_argv` decided on.
+    fn builder(argv: &[String]) -> CommandBuilder {
+        let mut c = CommandBuilder::new(&argv[0]);
+        c.args(&argv[1..]);
+        c
+    }
+
+    let mut cmd = if let Some(h) = &host {
+        let command = elsewhere("en_US.UTF-8");
+        builder(&local::local_argv("ssh", &["-t", h, &command]))
+    } else if local::LOCAL_IS_WSL {
+        // A local pod on Windows is a WSL pod: the same command an ssh pod
+        // sends to a server, carried by wsl.exe instead. `sh -l` only launches
+        // it — tmux starts the user's real shell from /etc/passwd inside the
+        // session, and that is the shell the pod actually feels like.
+        //
+        // TERM and the locale are exported by the command rather than set on
+        // the process below, because a Windows environment variable does not
+        // cross into the distro: WSL forwards only what WSLENV names, and a
+        // pod that silently lost its locale is the exact failure this file
+        // spends most of its comments on. The `cd` is there for the same
+        // reason — wsl.exe starts in the translation of the Windows working
+        // directory, which is `/mnt/c/Users/...` and nobody's home.
+        //
+        // The locale is chosen INSIDE the distro, and this is the one place
+        // that must not do what the ssh branch does. `en_US.UTF-8` is a fair
+        // bet on a server; on a WSL distro it is usually absent — a stock
+        // Ubuntu generates only `C`, `C.utf8` and `POSIX`. Naming a locale
+        // that was never generated does not fall back quietly: glibc drops to
+        // `C` collation while the variables still claim UTF-8, and a zsh
+        // config doing anything with character ranges dies with "character not
+        // in range", taking the user's prompt down to the `%m%#` fallback — a
+        // shell with no path in it. So keep whatever UTF-8 locale the distro
+        // already has, and only impose one when it has none. `$LANG` reaches
+        // tmux as a shell expansion, which is why it is passed down quoted.
+        let launch = format!(
+            "cd \"$HOME\" 2>/dev/null; case \"${{LANG:-}}\" in *[Uu][Tt][Ff]*) ;; *) LANG=C.UTF-8 ;; esac; export TERM=xterm-256color COLORTERM=truecolor LANG LC_CTYPE=\"$LANG\"; {}",
+            elsewhere("\"$LANG\"")
+        );
+        builder(&local::local_argv("sh", &["-lc", &launch]))
+    } else {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+        let mut c = CommandBuilder::new(&shell);
+        match &session {
+            Some(name) if guest => {
+                c.args([
+                    "-l",
+                    "-c",
+                    &format!(
+                        "tmux -u attach-session -t '={0}' || {{ echo 'tmux session {0} is gone'; exit 1; }}",
+                        name.replace('\'', "")
+                    ),
+                ]);
             }
-            c
+            // Attach-or-create a named tmux session so the pod's content
+            // survives app restarts; fall back to a plain shell when tmux
+            // is not installed.
+            Some(name) => {
+                c.args([
+                    "-l",
+                    "-c",
+                    &format!(
+                        "command -v tmux >/dev/null 2>&1 && {{ tmux -u set-option -sq set-clipboard on \\; set-option -saq terminal-features 'xterm-256color:clipboard:RGB' \\; set-environment -g LANG {lang} \\; set-environment -g LC_CTYPE {lang} \\; new-session -A -s '{}' -e LANG={lang} -e LC_CTYPE={lang} \\; set-option status off \\; set-option mouse on \\; set-option set-titles on \\; set-option set-titles-string '{title}' 2>/dev/null || {}; }} || exec \"{}\" -l",
+                        name.replace('\'', ""),
+                        legacy_tmux_command(name),
+                        shell,
+                        lang = &lang,
+                        title = TITLE_FORMAT
+                    ),
+                ]);
+            }
+            None => {
+                c.arg("-l");
+            }
         }
+        c
     };
     // A pod is an interactive terminal and must look like one, whatever
     // launched the app. Started from a tool runner, the app inherits
@@ -427,25 +451,8 @@ pub async fn tmux_session_started(host: Option<String>, session: String) -> Opti
         "tmux display -p -t '{}' '#{{session_created}}' 2>/dev/null",
         session.replace('\'', "")
     );
-    let out = match host {
-        None => std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&query)
-            .env(
-                "PATH",
-                format!(
-                    "{}:/opt/homebrew/bin:/usr/local/bin",
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
-            .output()
-            .ok()?,
-        Some(h) => std::process::Command::new("ssh")
-            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
-            .arg(&query)
-            .output()
-            .ok()?,
-    };
+    let out = local::shell_command(host.as_deref(), &query).output()
+            .ok()?;
     String::from_utf8_lossy(&out.stdout).trim().parse::<i64>().ok()
 }
 
@@ -476,21 +483,19 @@ pub fn pty_kill(state: State<'_, PtyManager>, id: String) -> Result<(), String> 
         if let Some(name) = inst.tmux_session.filter(|_| inst.owns_session) {
             let host = inst.host;
             std::thread::spawn(move || match host {
+                // Only the local `tmux` needs the Homebrew prefixes a GUI
+                // launch did not inherit; `ssh` is on the system PATH
+                // wherever this runs.
                 None => {
-                    let _ = std::process::Command::new("tmux")
+                    let _ = local::on_local_machine("tmux")
                         .args(["kill-session", "-t", &name])
-                        .env(
-                            "PATH",
-                            format!(
-                                "{}:/opt/homebrew/bin:/usr/local/bin",
-                                std::env::var("PATH").unwrap_or_default()
-                            ),
-                        )
+                        .env("PATH", local::tool_path())
                         .output();
                 }
                 Some(h) => {
-                    let _ = std::process::Command::new("ssh")
-                        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
+                    let _ = local::on_local_machine("ssh")
+                        .args(local::SSH_OPTS)
+                        .arg(&h)
                         .arg(format!("tmux kill-session -t '{}'", name.replace('\'', "")))
                         .output();
                 }
@@ -520,23 +525,7 @@ pub fn pty_detach(state: State<'_, PtyManager>, id: String) -> Result<(), String
 #[tauri::command]
 pub async fn tmux_kill_session(host: Option<String>, name: String) {
     let command = format!("tmux kill-session -t '{}'", name.replace('\'', ""));
-    let _ = match host {
-        None => std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&command)
-            .env(
-                "PATH",
-                format!(
-                    "{}:/opt/homebrew/bin:/usr/local/bin",
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
-            .output(),
-        Some(h) => std::process::Command::new("ssh")
-            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
-            .arg(&command)
-            .output(),
-    };
+    let _ = local::shell_command(host.as_deref(), &command).output();
 }
 
 /// Switch the session to one of its windows — what clicking a window in the pod
@@ -556,23 +545,7 @@ pub async fn tmux_select_window(host: Option<String>, session: String, index: i6
         session.replace('\'', ""),
         index
     );
-    let _ = match host {
-        None => std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&command)
-            .env(
-                "PATH",
-                format!(
-                    "{}:/opt/homebrew/bin:/usr/local/bin",
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
-            .output(),
-        Some(h) => std::process::Command::new("ssh")
-            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
-            .arg(&command)
-            .output(),
-    };
+    let _ = local::shell_command(host.as_deref(), &command).output();
 }
 
 /// Rename a session, so naming a pod carries through to `tmux ls` and to the
@@ -584,22 +557,6 @@ pub async fn tmux_rename_session(host: Option<String>, from: String, to: String)
         from.replace('\'', ""),
         to.replace('\'', "")
     );
-    let out = match host {
-        None => std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&command)
-            .env(
-                "PATH",
-                format!(
-                    "{}:/opt/homebrew/bin:/usr/local/bin",
-                    std::env::var("PATH").unwrap_or_default()
-                ),
-            )
-            .output(),
-        Some(h) => std::process::Command::new("ssh")
-            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", &h])
-            .arg(&command)
-            .output(),
-    };
+    let out = local::shell_command(host.as_deref(), &command).output();
     out.map(|o| o.status.success()).unwrap_or(false)
 }

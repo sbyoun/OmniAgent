@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { LOCAL_IS_WSL, run } from "./local";
 
 export interface SshHost {
   host: string;
@@ -10,16 +11,30 @@ export interface SshHost {
 }
 
 /**
+ * The `~/.ssh/config` whose hosts this app can actually reach.
+ *
+ * On macOS and Linux that is this user's, read straight off the disk. On
+ * Windows it is the distro's: pods run their `ssh` inside WSL, so Win32's
+ * `C:\Users\you\.ssh\config` — and the keys beside it — are not the ones
+ * that will be used, and listing hosts from it would offer the user a fleet
+ * that fails to connect.
+ */
+async function readSshConfig(): Promise<string | null> {
+  if (LOCAL_IS_WSL) return run(null, "cat ~/.ssh/config", "utf8").catch(() => null);
+  try {
+    return readFileSync(join(homedir(), ".ssh", "config"), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Parse ~/.ssh/config into a list of concrete Host entries. Wildcard patterns
  * (`*`, `?`) are skipped since they are not directly connectable.
  */
-export function listSshHosts(): SshHost[] {
-  let content: string;
-  try {
-    content = readFileSync(join(homedir(), ".ssh", "config"), "utf8");
-  } catch {
-    return [];
-  }
+export async function listSshHosts(): Promise<SshHost[]> {
+  const content = await readSshConfig();
+  if (content === null) return [];
 
   const hosts: SshHost[] = [];
   // Aliases currently collecting options (one `Host` line can declare several).

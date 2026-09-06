@@ -1,3 +1,4 @@
+mod local;
 mod pty;
 mod remote_fs;
 mod ssh_config;
