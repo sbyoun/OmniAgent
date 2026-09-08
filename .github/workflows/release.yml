@@ -15,7 +15,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
+          # Pinned, not macos-latest: the 2026-09 image update (Darwin 25.6)
+          # broke electron-builder's temporary signing keychain —
+          # `security set-key-partition-list` fails with "passphrase you
+          # entered is not correct" although the certificate and password are
+          # the ones the Tauri job imports successfully on the same image.
+          - platform: macos-15
             args: --mac --arm64 --x64
           - platform: ubuntu-22.04
             args: --linux
