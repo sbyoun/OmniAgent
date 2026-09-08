@@ -22,6 +22,15 @@ jobs:
           - platform: windows-latest
             args: --win
     runs-on: ${{ matrix.platform }}
+    # A Windows signing request sits in SignPath until a maintainer approves
+    # it; give the job room to wait (the action's own limit is set below).
+    timeout-minutes: 180
+    env:
+      # Windows binaries are signed through SignPath Foundation (see "Code
+      # signing policy" in the README) once the project exists there and the
+      # secrets are set. Until then the Windows runner publishes unsigned, as
+      # macOS and Linux do here — so a missing secret never blocks a release.
+      SIGNPATH: ${{ matrix.platform == 'windows-latest' && secrets.SIGNPATH_API_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -40,7 +49,57 @@ jobs:
       # electron-builder only packages what is already built.
       - run: npm run build:app
 
+      # ── Windows, signed ────────────────────────────────────────────────────
+      # Build locally, hand the installer and the portable zip to SignPath,
+      # and attach what comes back. Signing happens off the runner — the
+      # certificate never touches CI — and only after a maintainer approves
+      # the request in SignPath, which is what the long wait is for.
+      - name: Build (unsigned, for SignPath)
+        if: env.SIGNPATH == 'true'
+        run: npx electron-builder --win --publish never
+
+      - name: Upload unsigned Windows artifacts
+        if: env.SIGNPATH == 'true'
+        id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-unsigned
+          path: |
+            release/OmniAgent-electron-*.exe
+            release/OmniAgent-electron-*.zip
+          if-no-files-found: error
+
+      - name: Sign with SignPath
+        if: env.SIGNPATH == 'true'
+        id: signpath
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: omniagent
+          signing-policy-slug: release-signing
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          # Two hours for a human to approve; the job-level timeout is longer.
+          wait-for-completion-timeout-in-seconds: 7200
+          output-artifact-directory: signed
+
+      - name: Attach signed Windows artifacts to the release
+        if: env.SIGNPATH == 'true'
+        shell: bash
+        run: |
+          # Whichever job reaches the release first creates the draft; the
+          # `notes` job titles it once everything has uploaded.
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --title "$TAG" --notes ""
+          gh release upload "$TAG" signed/* --repo "$GITHUB_REPOSITORY" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+
+      # ── Everything else: electron-builder publishes straight to the draft ──
       - name: Build and publish
+        if: env.SIGNPATH != 'true'
         run: npx electron-builder ${{ matrix.args }} --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
