@@ -22,6 +22,7 @@ import {
   writePty,
 } from "./pty";
 import { listSshHosts } from "./sshConfig";
+import { detectLocal, localMode } from "./local";
 
 /** Vite dev server, when running `npm run dev`. */
 const devUrl = process.env.VITE_DEV_SERVER_URL;
@@ -127,15 +128,29 @@ function buildMenu() {
       },
       {
         label: "Edit",
-        submenu: [
-          { role: "undo" },
-          { role: "redo" },
-          { type: "separator" },
-          { role: "cut" },
-          { role: "copy" },
-          { role: "paste" },
-          { role: "selectAll" },
-        ],
+        // On macOS these roles are what make ⌘C/⌘V/⌘A work at all, and ⌘ never
+        // collides with the shell. On Windows and Linux the same roles would
+        // register Ctrl+C, Ctrl+V, Ctrl+A and Ctrl+Z with the system — and a
+        // registered accelerator fires before the renderer sees the key, so
+        // Ctrl+C could no longer interrupt a process and Ctrl+A no longer
+        // reached the shell. Chromium already handles those keys natively in
+        // the editor and every input, so there the items stay in the menu but
+        // register nothing; the terminal's own bindings live in TerminalPod.
+        submenu: (
+          [
+            { role: "undo" },
+            { role: "redo" },
+            { type: "separator" },
+            { role: "cut" },
+            { role: "copy" },
+            { role: "paste" },
+            { role: "selectAll" },
+          ] as MenuItemConstructorOptions[]
+        ).map((item) =>
+          process.platform === "darwin" || item.type === "separator"
+            ? item
+            : { ...item, registerAccelerator: false },
+        ),
       },
       {
         label: "View",
@@ -211,7 +226,11 @@ function createWindow() {
   else win.loadFile(join(__dirname, "../dist/index.html"));
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Settle where "local" is before anything can ask — the first pod, the host
+  // list and the sessions panel all branch on it. On Windows this is one
+  // `wsl.exe -l -q`; elsewhere it resolves at once.
+  await detectLocal();
   buildMenu();
   registerHandlers();
   createWindow();
@@ -230,6 +249,9 @@ app.on("before-quit", killAllPtys);
 
 function registerHandlers() {
   ipcMain.handle("list_ssh_hosts", () => listSshHosts());
+  // "posix" | "wsl" | "native" — so the UI can say when a local pod will not
+  // restore its content (native: no tmux behind it).
+  ipcMain.handle("local_mode", () => localMode());
 
   ipcMain.on(
     "pty_spawn",

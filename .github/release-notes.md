@@ -15,5 +15,10 @@ has the measurements.
 If you type CJK in the terminal on macOS, take the Electron build; otherwise
 either is fine.
 
+On Windows, take the Electron build (`OmniAgent-electron-*.exe`, an
+installer): remote pods use Windows' own OpenSSH and `~/.ssh/config`, and the
+local pod runs in your WSL distro when you have one, PowerShell when you do
+not. The Tauri build still expects WSL for everything.
+
 macOS builds are signed and notarized, so they open without the Gatekeeper
 detour.

@@ -1,6 +1,8 @@
 use serde::Serialize;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+use crate::local;
 
 #[derive(Serialize, Clone)]
 pub struct DirEntry {
@@ -13,18 +15,12 @@ fn shell_quote(path: &str) -> String {
     format!("'{}'", path.replace('\'', r"'\''"))
 }
 
-fn ssh_base(host: &str) -> Command {
-    let mut c = Command::new("ssh");
-    c.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host]);
-    c
-}
-
 /// On-demand directory listing: local fs when `host` is None, otherwise a
 /// one-shot `ssh <host> ls` (SDD 3.3 — connect only when the explorer opens).
 #[tauri::command]
 pub async fn fs_list_dir(host: Option<String>, path: String) -> Result<Vec<DirEntry>, String> {
     match host {
-        None => {
+        None if local::OWN_FS_IS_LOCAL => {
             let mut out = Vec::new();
             let entries = std::fs::read_dir(&path).map_err(|e| e.to_string())?;
             for e in entries.flatten() {
@@ -41,10 +37,10 @@ pub async fn fs_list_dir(host: Option<String>, path: String) -> Result<Vec<DirEn
             sort_entries(&mut out);
             Ok(out)
         }
-        Some(h) => {
+        host => {
             // -L dereferences symlinks so linked directories get the `/`
             // marker from -p too.
-            let output = ssh_base(&h)
+            let output = local::fs_shell(host.as_deref())
                 .arg(format!("ls -1ALp {}", shell_quote(&path)))
                 .output()
                 .map_err(|e| e.to_string())?;
@@ -72,9 +68,9 @@ fn sort_entries(entries: &mut [DirEntry]) {
 #[tauri::command]
 pub async fn fs_read_file(host: Option<String>, path: String) -> Result<String, String> {
     match host {
-        None => std::fs::read_to_string(&path).map_err(|e| e.to_string()),
-        Some(h) => {
-            let output = ssh_base(&h)
+        None if local::OWN_FS_IS_LOCAL => std::fs::read_to_string(&path).map_err(|e| e.to_string()),
+        host => {
+            let output = local::fs_shell(host.as_deref())
                 .arg(format!("cat {}", shell_quote(&path)))
                 .output()
                 .map_err(|e| e.to_string())?;
@@ -89,9 +85,9 @@ pub async fn fs_read_file(host: Option<String>, path: String) -> Result<String, 
 #[tauri::command]
 pub async fn fs_write_file(host: Option<String>, path: String, content: String) -> Result<(), String> {
     match host {
-        None => std::fs::write(&path, content).map_err(|e| e.to_string()),
-        Some(h) => {
-            let mut child = ssh_base(&h)
+        None if local::OWN_FS_IS_LOCAL => std::fs::write(&path, content).map_err(|e| e.to_string()),
+        host => {
+            let mut child = local::fs_shell(host.as_deref())
                 .arg(format!("cat > {}", shell_quote(&path)))
                 .stdin(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -115,9 +111,9 @@ pub async fn fs_write_file(host: Option<String>, path: String, content: String) 
 #[tauri::command]
 pub async fn fs_mkdir(host: Option<String>, path: String) -> Result<(), String> {
     match host {
-        None => std::fs::create_dir(&path).map_err(|e| e.to_string()),
-        Some(h) => {
-            let output = ssh_base(&h)
+        None if local::OWN_FS_IS_LOCAL => std::fs::create_dir(&path).map_err(|e| e.to_string()),
+        host => {
+            let output = local::fs_shell(host.as_deref())
                 .arg(format!("mkdir {}", shell_quote(&path)))
                 .output()
                 .map_err(|e| e.to_string())?;
@@ -132,15 +128,15 @@ pub async fn fs_mkdir(host: Option<String>, path: String) -> Result<(), String> 
 #[tauri::command]
 pub async fn fs_create_file(host: Option<String>, path: String) -> Result<(), String> {
     match host {
-        None => {
+        None if local::OWN_FS_IS_LOCAL => {
             if std::path::Path::new(&path).exists() {
                 return Err("already exists".into());
             }
             std::fs::write(&path, "").map_err(|e| e.to_string())
         }
-        Some(h) => {
+        host => {
             let q = shell_quote(&path);
-            let output = ssh_base(&h)
+            let output = local::fs_shell(host.as_deref())
                 .arg(format!(
                     "test -e {q} && echo EXISTS >&2 && exit 1; touch {q}"
                 ))
@@ -196,9 +192,9 @@ pub async fn fs_upload(request: tauri::ipc::Request<'_>) -> Result<(), String> {
         _ => return Err("expected raw body".into()),
     };
     match host {
-        None => std::fs::write(&path, data).map_err(|e| e.to_string()),
-        Some(h) => {
-            let mut child = ssh_base(&h)
+        None if local::OWN_FS_IS_LOCAL => std::fs::write(&path, data).map_err(|e| e.to_string()),
+        host => {
+            let mut child = local::fs_shell(host.as_deref())
                 .arg(format!("cat > {}", shell_quote(&path)))
                 .stdin(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -221,6 +217,11 @@ pub async fn fs_upload(request: tauri::ipc::Request<'_>) -> Result<(), String> {
 
 /// Copy a file into ~/Downloads (fetching it over ssh for remote pods).
 /// Returns the saved path. Never overwrites: collisions get ` (2)`, ` (3)`…
+///
+/// The destination is deliberately the one the *desktop* calls Downloads, so
+/// on Windows the file lands in `C:\Users\…\Downloads` where Explorer and the
+/// browser look for it — a download nobody can find is not a download. Only
+/// the fetch reaches into the distro.
 #[tauri::command]
 pub async fn fs_download(host: Option<String>, path: String) -> Result<String, String> {
     let dir = dirs::home_dir().ok_or("no home dir")?.join("Downloads");
@@ -239,11 +240,11 @@ pub async fn fs_download(host: Option<String>, path: String) -> Result<String, S
     }
 
     match host {
-        None => {
+        None if local::OWN_FS_IS_LOCAL => {
             std::fs::copy(&path, &target).map_err(|e| e.to_string())?;
         }
-        Some(h) => {
-            let output = ssh_base(&h)
+        host => {
+            let output = local::fs_shell(host.as_deref())
                 .arg(format!("cat {}", shell_quote(&path)))
                 .output()
                 .map_err(|e| e.to_string())?;
@@ -261,9 +262,9 @@ pub async fn fs_download(host: Option<String>, path: String) -> Result<String, S
 #[tauri::command]
 pub async fn fs_read_base64(host: Option<String>, path: String) -> Result<String, String> {
     let bytes: Vec<u8> = match host {
-        None => std::fs::read(&path).map_err(|e| e.to_string())?,
-        Some(h) => {
-            let output = ssh_base(&h)
+        None if local::OWN_FS_IS_LOCAL => std::fs::read(&path).map_err(|e| e.to_string())?,
+        host => {
+            let output = local::fs_shell(host.as_deref())
                 .arg(format!("cat {}", shell_quote(&path)))
                 .output()
                 .map_err(|e| e.to_string())?;
@@ -330,12 +331,12 @@ fi"#;
 #[tauri::command]
 pub async fn host_stats(host: Option<String>) -> Result<HostStats, String> {
     let out = match host {
-        None => Command::new("sh")
+        None => local::on_local_machine("sh")
             .arg("-c")
             .arg(STATS_SNIPPET)
             .output()
             .map_err(|e| e.to_string())?,
-        Some(h) => ssh_base(&h)
+        Some(h) => local::fs_shell(Some(&h))
             .arg(STATS_SNIPPET)
             .output()
             .map_err(|e| e.to_string())?,
@@ -369,7 +370,7 @@ pub struct PathInfo {
 #[tauri::command]
 pub async fn fs_stat(host: Option<String>, path: String) -> Result<PathInfo, String> {
     match host {
-        None => match std::fs::metadata(&path) {
+        None if local::OWN_FS_IS_LOCAL => match std::fs::metadata(&path) {
             Ok(m) => Ok(PathInfo {
                 exists: true,
                 is_dir: m.is_dir(),
@@ -379,9 +380,9 @@ pub async fn fs_stat(host: Option<String>, path: String) -> Result<PathInfo, Str
                 is_dir: false,
             }),
         },
-        Some(h) => {
+        host => {
             let q = shell_quote(&path);
-            let output = ssh_base(&h)
+            let output = local::fs_shell(host.as_deref())
                 .arg(format!("if [ -d {q} ]; then echo dir; elif [ -e {q} ]; then echo file; else echo none; fi"))
                 .output()
                 .map_err(|e| e.to_string())?;
@@ -399,11 +400,11 @@ pub async fn fs_stat(host: Option<String>, path: String) -> Result<PathInfo, Str
 #[tauri::command]
 pub async fn fs_home_dir(host: Option<String>) -> Result<String, String> {
     match host {
-        None => dirs::home_dir()
+        None if local::OWN_FS_IS_LOCAL => dirs::home_dir()
             .map(|p| p.to_string_lossy().to_string())
             .ok_or_else(|| "no home dir".into()),
-        Some(h) => {
-            let output = ssh_base(&h)
+        host => {
+            let output = local::fs_shell(host.as_deref())
                 .arg("echo $HOME")
                 .output()
                 .map_err(|e| e.to_string())?;
@@ -419,6 +420,11 @@ pub async fn fs_home_dir(host: Option<String>) -> Result<String, String> {
 /// webview's own storage is per-engine, so a layout saved in one build would
 /// be invisible to the other even though the tmux sessions behind the pods
 /// are shared.
+///
+/// This one stays on the Windows side of the fence rather than in the distro,
+/// unlike everything else here: it is the app's own state, not the user's
+/// work, and both shells read it before a pod exists — so Windows is the place
+/// they can both reach without waking WSL first.
 fn layout_file() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".config").join("omniagent").join("layout.json"))
 }

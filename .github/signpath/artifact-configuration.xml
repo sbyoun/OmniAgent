@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for the Windows release — a reference copy
+  of what is configured in the SignPath project (SignPath reads its own copy,
+  not this file; keep the two in step).
+
+  The Release workflow uploads the installer and the portable zip with
+  actions/upload-artifact, which wraps them in one zip: that is the root
+  <zip-file>. Inside it:
+
+  - OmniAgent-electron-<version>-x64.exe  the NSIS installer, a PE file —
+    signed as a whole. This is the file SmartScreen judges on download.
+  - OmniAgent-electron-<version>-x64.zip  the no-install build; the app's own
+    OmniAgent.exe at its root is deep-signed so an unzipped copy is signed too.
+
+  The product-name restriction is a SignPath Foundation requirement: nothing
+  but a binary that identifies itself as OmniAgent can be signed under this
+  configuration.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file-set>
+      <include path="OmniAgent-electron-*.exe" max-matches="unbounded" product-name="OmniAgent" />
+      <for-each>
+        <authenticode-sign />
+      </for-each>
+    </pe-file-set>
+
+    <zip-file-set>
+      <include path="OmniAgent-electron-*.zip" max-matches="unbounded" />
+      <for-each>
+        <pe-file path="OmniAgent.exe" product-name="OmniAgent">
+          <authenticode-sign />
+        </pe-file>
+      </for-each>
+    </zip-file-set>
+  </zip-file>
+</artifact-configuration>

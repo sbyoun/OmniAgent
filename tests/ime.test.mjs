@@ -34,11 +34,9 @@ function harness() {
     removeEventListener: () => {},
   };
   const pty = [];
-  let keyHandler = () => true;
   const term = {
     textarea: ta,
     options: {},
-    attachCustomKeyEventHandler: (h) => (keyHandler = h),
     onCursorMove: () => ({ dispose: () => {} }),
   };
   const ime = setupImeInput(term, (d) => pty.push(d));
@@ -69,7 +67,9 @@ function harness() {
       route(data);
     },
     compose: () => listeners.compositionstart(),
-    key: (k) => keyHandler({ type: "keydown", key: k }),
+    // The bridge no longer attaches its own xterm key handler (xterm keeps
+    // exactly one, and the pod owns it); it hands back a verdict instead.
+    key: (k) => ime.handleKey({ type: "keydown", key: k }),
     /** xterm empties the box in its own blur handler, which runs first. */
     blur: () => {
       ta.value = "";

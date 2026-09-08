@@ -44,7 +44,13 @@ const composedOnly = (s: string) =>
  */
 export function setupImeInput(term: Terminal, send: (data: string) => void) {
   const ta = term.textarea;
-  if (!ta) return { route: (d: string) => d, dispose: () => {} };
+  if (!ta) {
+    return {
+      route: (d: string) => d,
+      handleKey: (_e: KeyboardEvent) => true,
+      dispose: () => {},
+    };
+  }
 
   /** Prefix of the box already handed to the pty. */
   let sent = "";
@@ -221,12 +227,19 @@ export function setupImeInput(term: Terminal, send: (data: string) => void) {
   // While a syllable is composing, Backspace edits the IME buffer. Returning
   // false keeps xterm from consuming the key (and from sending \x7f for text
   // the terminal never received).
-  term.attachCustomKeyEventHandler((e) => {
+  //
+  // Handed back to the caller rather than attached here: xterm holds ONE
+  // custom key handler, and attaching a second silently replaced the pod's
+  // own — which is how every copy/paste binding in TerminalPod went dead
+  // while this one kept working. The pod composes the two.
+  const handleKey = (e: KeyboardEvent): boolean => {
     if (native || e.type !== "keydown" || e.key !== "Backspace") return true;
     return ta.value.length <= sent.length;
-  });
+  };
 
   return {
+    /** xterm custom-key-handler verdict for this key: false = leave it alone. */
+    handleKey,
     /**
      * Route one xterm emission: returns what should reach the pty, or null
      * when the bridge already handled it.

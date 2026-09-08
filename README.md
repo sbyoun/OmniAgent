@@ -116,10 +116,77 @@ Building the Tauri shell also needs [Rust](https://rustup.rs).
 On first launch the sidebar lists every concrete `Host` from your
 `~/.ssh/config`. Click one (or *Local Terminal*) to launch a pod.
 
+### On Windows
+
+Remote pods are native: the OpenSSH that ships with Windows, your
+`C:\Users\you\.ssh\config`, and the keys beside it. The tmux behind a remote
+pod runs on the server, so nothing else is needed — the sidebar fills from that
+file and every ssh pod works exactly as on a Mac.
+
+The local pod depends on whether you have WSL, because tmux has no Windows
+port and tmux is what makes a pod's content survive a relaunch:
+
+- **With a WSL distro** — the local pod is a pod *in the distro*: its `~`, its
+  files, its `tmux ls`, with full session restore. Nothing to configure if
+  `wsl.exe` starts your default distro; `OMNIAGENT_WSL_DISTRO` picks another.
+- **Without WSL** — the local pod is PowerShell (`pwsh` if installed, else
+  Windows PowerShell; `OMNIAGENT_SHELL` overrides). Everything works except
+  restore: the pod comes back empty after a relaunch, like a Mac without tmux.
+
+Detected once at startup; `OMNIAGENT_LOCAL=wsl|native` forces it. If your ssh
+keys live in the distro rather than on the Windows side, `OMNIAGENT_SSH=wsl`
+routes ssh through it too. Downloads and the saved layout stay on the Windows
+side, where Explorer can find them.
+
+Copy and paste in a pod follow Windows Terminal: `Ctrl+Shift+C` copies the
+selection, `Ctrl+Shift+V`, `Shift+Insert` or `Ctrl+V` paste, and `Ctrl+C`
+copies when text is selected and interrupts when it is not.
+
+Develop in WSL, build in Windows. `node_modules` holds per-platform binaries,
+so one directory cannot serve both — keep a Windows-side copy for building, and
+never run `npm ci` against the WSL path from PowerShell.
+
+```bash
+# WSL — push the source to the Windows-side build directory
+rsync -a --delete \
+  --exclude node_modules --exclude dist --exclude dist-electron \
+  --exclude dist-test --exclude release --exclude src-tauri/target \
+  ~/path/to/OmniAgent/ /mnt/c/path/to/OmniAgent/
+```
+
+```powershell
+# PowerShell — build the installer
+cd C:\path\to\OmniAgent
+npm ci                 # first time, and whenever dependencies change
+npm run package:win    # → release\OmniAgent-electron-<version>-x64.exe
+```
+
+Take the Electron build on Windows; the Tauri shell has not been brought across
+yet.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate
+by [SignPath Foundation](https://signpath.org).
+
+Windows binaries on the [releases page](https://github.com/sbyoun/OmniAgent/releases)
+are signed with a SignPath Foundation certificate. Every release is built by
+the [Release workflow](.github/workflows/release.yml) on GitHub Actions from a
+tagged commit of this repository, and each signing request is approved by a
+maintainer before the certificate is applied.
+
+Team roles: [@sbyoun](https://github.com/sbyoun) is the committer, reviewer and
+approver. Changes from anyone else are reviewed before they are merged.
+
+Privacy: this program will not transfer any information to other networked
+systems unless specifically requested by the user — it connects only to the
+SSH hosts you choose from your own `~/.ssh/config`.
+
 ## Status & roadmap
 
-Early but functional — built and daily-driven on macOS. Windows/Linux are
-untested.
+Early but functional — built and daily-driven on macOS. Linux is untested.
+Windows is newer than the rest: remote pods native, local pod in WSL when
+there is one and PowerShell when there is not.
 
 Development is tracked on the [issue tracker](https://github.com/sbyoun/OmniAgent/issues)
 and grouped into [milestones](https://github.com/sbyoun/OmniAgent/milestones):
