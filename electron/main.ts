@@ -128,15 +128,29 @@ function buildMenu() {
       },
       {
         label: "Edit",
-        submenu: [
-          { role: "undo" },
-          { role: "redo" },
-          { type: "separator" },
-          { role: "cut" },
-          { role: "copy" },
-          { role: "paste" },
-          { role: "selectAll" },
-        ],
+        // On macOS these roles are what make ⌘C/⌘V/⌘A work at all, and ⌘ never
+        // collides with the shell. On Windows and Linux the same roles would
+        // register Ctrl+C, Ctrl+V, Ctrl+A and Ctrl+Z with the system — and a
+        // registered accelerator fires before the renderer sees the key, so
+        // Ctrl+C could no longer interrupt a process and Ctrl+A no longer
+        // reached the shell. Chromium already handles those keys natively in
+        // the editor and every input, so there the items stay in the menu but
+        // register nothing; the terminal's own bindings live in TerminalPod.
+        submenu: (
+          [
+            { role: "undo" },
+            { role: "redo" },
+            { type: "separator" },
+            { role: "cut" },
+            { role: "copy" },
+            { role: "paste" },
+            { role: "selectAll" },
+          ] as MenuItemConstructorOptions[]
+        ).map((item) =>
+          process.platform === "darwin" || item.type === "separator"
+            ? item
+            : { ...item, registerAccelerator: false },
+        ),
       },
       {
         label: "View",

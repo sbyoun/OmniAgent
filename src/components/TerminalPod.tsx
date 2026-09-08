@@ -544,8 +544,59 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     // instead of forwarding bytes to the shell. Only the platform's real
     // modifier is reserved, so Ctrl+W on macOS still reaches the shell as its
     // own delete-word.
+    //
+    // Copy and paste are the other thing handled here, and only off macOS.
+    // There ⌘C/⌘V come through the Edit menu, whose roles copy the native
+    // selection and paste into xterm's textarea, and ⌘ never collides with
+    // the shell. Windows and Linux have no such luxury: Ctrl+C is the
+    // interrupt and Ctrl+V a byte of its own, so the menu does not register
+    // them (see main.ts) and the terminal follows Windows Terminal instead —
+    // Ctrl+Shift+C copies, Ctrl+Shift+V / Shift+Insert / Ctrl+V paste, and
+    // Ctrl+C copies when something is selected and interrupts when not.
+    // `term.paste` honours bracketed-paste mode, so a multi-line paste into a
+    // shell or editor that asks for it arrives as one paste, not as keystrokes.
+    const copySelection = (): boolean => {
+      const text = term.getSelection();
+      if (!text) return false;
+      void navigator.clipboard.writeText(text).catch(() => {});
+      term.clearSelection();
+      return true;
+    };
+    const pasteClipboard = () => {
+      void navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (text) term.paste(text);
+        })
+        .catch(() => {});
+    };
+    //
+    // xterm keeps a single custom key handler, so the IME bridge's verdict is
+    // folded in here rather than attached on its own (which would replace this
+    // one). It is wired up once the bridge exists, further down.
+    let imeHandleKey: (e: KeyboardEvent) => boolean = () => true;
     term.attachCustomKeyEventHandler((e) => {
+      if (!imeHandleKey(e)) return false;
       if (e.type !== "keydown") return true;
+      if (!IS_MAC && !e.altKey && !e.metaKey) {
+        // Returning false only keeps xterm off the key; the browser's own
+        // default still runs, and Chromium's defaults for these very keys are
+        // copy and paste (Ctrl+Insert, Shift+Insert, Ctrl+V, Ctrl+Shift+V) —
+        // which xterm then handles too, through its copy/paste DOM listeners.
+        // Without preventDefault every paste landed twice.
+        const claim = (action: () => unknown): false => {
+          e.preventDefault();
+          action();
+          return false;
+        };
+        if (e.shiftKey && e.code === "Insert") return claim(pasteClipboard);
+        if (e.ctrlKey && !e.shiftKey && e.code === "Insert") return claim(copySelection);
+        if (e.ctrlKey && e.shiftKey && e.code === "KeyC") return claim(copySelection);
+        if (e.ctrlKey && e.shiftKey && e.code === "KeyV") return claim(pasteClipboard);
+        if (e.ctrlKey && !e.shiftKey && e.code === "KeyC" && term.hasSelection())
+          return claim(copySelection);
+        if (e.ctrlKey && !e.shiftKey && e.code === "KeyV") return claim(pasteClipboard);
+      }
       const mod = IS_MAC ? e.metaKey : e.ctrlKey;
       if (!mod || e.altKey) return true;
       if (!e.shiftKey && e.code === "KeyW") return false;
@@ -584,6 +635,22 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       });
     }
     const unlisteners: Array<() => void> = [];
+
+    // The drag above survives its own mouseup, but not the first mouse
+    // movement after it. A program in the pod can ask for any-motion mouse
+    // reporting (mode 1003 — an agent TUI does), whereupon xterm reports every
+    // hover to it, and xterm treats each report it sends as user input, on
+    // which it clears the selection. So a selection lived exactly until the
+    // hand came off the mouse and moved: too short to copy from. Hover is the
+    // one report nothing inside a pod depends on, so while a selection stands
+    // it stops here, before xterm's listener sees it. Drags (a button held),
+    // clicks and the wheel still reach the program; the next click clears the
+    // selection and hover reporting resumes.
+    const keepSelectionOnHover = (e: MouseEvent) => {
+      if (e.buttons === 0 && term.hasSelection()) e.stopPropagation();
+    };
+    el.addEventListener("mousemove", keepSelectionOnHover, true);
+    unlisteners.push(() => el.removeEventListener("mousemove", keepSelectionOnHover, true));
 
     // Reset on every connect, so the "died instantly" rule below judges the
     // latest attempt rather than the pod's whole life.
@@ -786,6 +853,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     // the bridge fills that in and stands down where composition events fire,
     // which is every Chromium build. See WEBKIT-IME.md.
     const ime = setupImeInput(term, write);
+    imeHandleKey = ime.handleKey;
     const dataSub = term.onData((data) => {
       const out = ime.route(data);
       if (out) write(out);

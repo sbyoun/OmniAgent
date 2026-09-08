@@ -138,6 +138,10 @@ keys live in the distro rather than on the Windows side, `OMNIAGENT_SSH=wsl`
 routes ssh through it too. Downloads and the saved layout stay on the Windows
 side, where Explorer can find them.
 
+Copy and paste in a pod follow Windows Terminal: `Ctrl+Shift+C` copies the
+selection, `Ctrl+Shift+V`, `Shift+Insert` or `Ctrl+V` paste, and `Ctrl+C`
+copies when text is selected and interrupts when it is not.
+
 Develop in WSL, build in Windows. `node_modules` holds per-platform binaries,
 so one directory cannot serve both — keep a Windows-side copy for building, and
 never run `npm ci` against the WSL path from PowerShell.
