@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { LOCAL_IS_WSL, run } from "./local";
+import { run, sshViaWsl } from "./local";
 
 export interface SshHost {
   host: string;
@@ -11,16 +11,14 @@ export interface SshHost {
 }
 
 /**
- * The `~/.ssh/config` whose hosts this app can actually reach.
- *
- * On macOS and Linux that is this user's, read straight off the disk. On
- * Windows it is the distro's: pods run their `ssh` inside WSL, so Win32's
- * `C:\Users\you\.ssh\config` — and the keys beside it — are not the ones
- * that will be used, and listing hosts from it would offer the user a fleet
- * that fails to connect.
+ * The `~/.ssh/config` whose hosts this app can actually reach — the one next
+ * to the `ssh` that will be run. Natively that is this user's, read straight
+ * off the disk (on Windows, `C:\Users\you\.ssh\config`, which Windows' own
+ * OpenSSH reads). Only when ssh is routed through WSL is it the distro's:
+ * listing hosts from the other file would offer a fleet that fails to connect.
  */
 async function readSshConfig(): Promise<string | null> {
-  if (LOCAL_IS_WSL) return run(null, "cat ~/.ssh/config", "utf8").catch(() => null);
+  if (sshViaWsl()) return run(null, "cat ~/.ssh/config", "utf8").catch(() => null);
   try {
     return readFileSync(join(homedir(), ".ssh", "config"), "utf8");
   } catch {

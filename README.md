@@ -118,12 +118,25 @@ On first launch the sidebar lists every concrete `Host` from your
 
 ### On Windows
 
-A local pod is a pod in your WSL distro — the distro is the machine. Its `~`,
-its files, its `tmux ls`, and its `~/.ssh/config` are the ones you get, because
-the `ssh` that runs is the one with the keys next to it. Nothing to configure
-if `wsl.exe` starts your default distro; set `OMNIAGENT_WSL_DISTRO` to pick
-another. Downloads and the saved layout stay on the Windows side, where
-Explorer can find them.
+Remote pods are native: the OpenSSH that ships with Windows, your
+`C:\Users\you\.ssh\config`, and the keys beside it. The tmux behind a remote
+pod runs on the server, so nothing else is needed — the sidebar fills from that
+file and every ssh pod works exactly as on a Mac.
+
+The local pod depends on whether you have WSL, because tmux has no Windows
+port and tmux is what makes a pod's content survive a relaunch:
+
+- **With a WSL distro** — the local pod is a pod *in the distro*: its `~`, its
+  files, its `tmux ls`, with full session restore. Nothing to configure if
+  `wsl.exe` starts your default distro; `OMNIAGENT_WSL_DISTRO` picks another.
+- **Without WSL** — the local pod is PowerShell (`pwsh` if installed, else
+  Windows PowerShell; `OMNIAGENT_SHELL` overrides). Everything works except
+  restore: the pod comes back empty after a relaunch, like a Mac without tmux.
+
+Detected once at startup; `OMNIAGENT_LOCAL=wsl|native` forces it. If your ssh
+keys live in the distro rather than on the Windows side, `OMNIAGENT_SSH=wsl`
+routes ssh through it too. Downloads and the saved layout stay on the Windows
+side, where Explorer can find them.
 
 Develop in WSL, build in Windows. `node_modules` holds per-platform binaries,
 so one directory cannot serve both — keep a Windows-side copy for building, and
@@ -147,10 +160,29 @@ npm run package:win    # → release\OmniAgent-electron-<version>-x64.exe
 Take the Electron build on Windows; the Tauri shell has not been brought across
 yet.
 
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io), certificate
+by [SignPath Foundation](https://signpath.org).
+
+Windows binaries on the [releases page](https://github.com/sbyoun/OmniAgent/releases)
+are signed with a SignPath Foundation certificate. Every release is built by
+the [Release workflow](.github/workflows/release.yml) on GitHub Actions from a
+tagged commit of this repository, and each signing request is approved by a
+maintainer before the certificate is applied.
+
+Team roles: [@sbyoun](https://github.com/sbyoun) is the committer, reviewer and
+approver. Changes from anyone else are reviewed before they are merged.
+
+Privacy: this program will not transfer any information to other networked
+systems unless specifically requested by the user — it connects only to the
+SSH hosts you choose from your own `~/.ssh/config`.
+
 ## Status & roadmap
 
 Early but functional — built and daily-driven on macOS. Linux is untested.
-Windows runs its pods through WSL, and is newer than the rest.
+Windows is newer than the rest: remote pods native, local pod in WSL when
+there is one and PowerShell when there is not.
 
 Development is tracked on the [issue tracker](https://github.com/sbyoun/OmniAgent/issues)
 and grouped into [milestones](https://github.com/sbyoun/OmniAgent/milestones):

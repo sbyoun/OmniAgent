@@ -22,6 +22,7 @@ import {
   writePty,
 } from "./pty";
 import { listSshHosts } from "./sshConfig";
+import { detectLocal, localMode } from "./local";
 
 /** Vite dev server, when running `npm run dev`. */
 const devUrl = process.env.VITE_DEV_SERVER_URL;
@@ -211,7 +212,11 @@ function createWindow() {
   else win.loadFile(join(__dirname, "../dist/index.html"));
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Settle where "local" is before anything can ask — the first pod, the host
+  // list and the sessions panel all branch on it. On Windows this is one
+  // `wsl.exe -l -q`; elsewhere it resolves at once.
+  await detectLocal();
   buildMenu();
   registerHandlers();
   createWindow();
@@ -230,6 +235,9 @@ app.on("before-quit", killAllPtys);
 
 function registerHandlers() {
   ipcMain.handle("list_ssh_hosts", () => listSshHosts());
+  // "posix" | "wsl" | "native" — so the UI can say when a local pod will not
+  // restore its content (native: no tmux behind it).
+  ipcMain.handle("local_mode", () => localMode());
 
   ipcMain.on(
     "pty_spawn",

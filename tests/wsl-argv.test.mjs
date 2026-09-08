@@ -1,26 +1,35 @@
 /**
- * What a pod is actually launched with, on each platform.
+ * What a pod is actually launched with, on each platform and in each of the
+ * places "local" can be.
  *
- * The Windows build reaches its tmux through WSL — the local machine is the
- * distro — and that is one wrapper applied in `electron/local.ts`. The risk in
- * a change shaped like that is not that Windows comes out wrong; it is that
- * macOS and Linux quietly come out different. So the assertions below are
- * mostly about the platforms that were NOT the point: the local pod must still
- * be `$SHELL -l -c`, the remote pod must still be a bare `ssh -t`, and neither
- * may pick up a `wsl.exe` anywhere.
+ * `electron/local.ts` decides that once per process: `posix` off Windows, and
+ * on Windows either `wsl` (a distro is the local machine, pods ride wsl.exe to
+ * its tmux) or `native` (no distro; the pod is PowerShell and there is no tmux
+ * to attach to). ssh is native by default on every platform and only goes
+ * through the distro when `OMNIAGENT_SSH=wsl` asks for it.
  *
- * `process.platform` is read once, when `local.ts` is first evaluated, so the
- * Windows half imports the bundle again under a different URL to get a second
- * evaluation with the platform swapped.
+ * The risk in a change shaped like that is not that Windows comes out wrong;
+ * it is that macOS and Linux quietly come out different. So the first block is
+ * about the platform that was NOT the point: the local pod must still be
+ * `$SHELL -l -c`, the remote pod must still be a bare `ssh -t`, and neither may
+ * pick up a `wsl.exe` anywhere.
+ *
+ * `local.ts` reads `process.platform` and its environment once, when first
+ * evaluated, so each variant imports the bundle again under a different URL to
+ * get a fresh evaluation with the platform and mode swapped. The mode is
+ * forced through `OMNIAGENT_LOCAL`, which exists for exactly this: the test
+ * runs on machines with no wsl.exe to detect against.
  *
  *   npx esbuild electron/pty.ts --bundle --format=esm --platform=node \
  *     --alias:node-pty=./tests/stub-node-pty.mjs --external:electron \
  *     --outfile=dist-test/pty-argv.mjs
  *   node tests/wsl-argv.test.mjs
  */
-import { fileURLToPath } from "node:url";
 
-const bundle = fileURLToPath(new URL("../dist-test/pty-argv.mjs", import.meta.url));
+// Kept as a URL, not a path: on Windows `import("C:\\…")` is rejected by the
+// ESM loader (`ERR_UNSUPPORTED_ESM_URL_SCHEME`, protocol 'c:'), and a URL is
+// what the `?variant` suffixes below were always meant to be appended to.
+const bundle = new URL("../dist-test/pty-argv.mjs", import.meta.url).href;
 
 const sender = { isDestroyed: () => false, send: () => {} };
 
@@ -38,13 +47,40 @@ function launch(mod, { host = null, session = null, owns = true } = {}) {
   return { file: call.file, args: call.args, command: call.args.at(-1) };
 }
 
-const posix = await import(bundle);
+/**
+ * One evaluation of the bundle under a given platform and environment. Every
+ * knob is restored afterwards so the variants cannot leak into each other.
+ */
+async function variant(name, platform, env = {}) {
+  const realPlatform = process.platform;
+  const saved = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
+  Object.defineProperty(process, "platform", { value: platform, configurable: true });
+  for (const [k, v] of Object.entries(env)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    return await import(`${bundle}?${name}`);
+  } finally {
+    Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
 
-Object.defineProperty(process, "platform", { value: "win32", configurable: true });
-const win = await import(`${bundle}?win32`);
-Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+const noKnobs = { OMNIAGENT_LOCAL: undefined, OMNIAGENT_WSL_DISTRO: undefined, OMNIAGENT_SSH: undefined };
 
-// ── The platforms this change was not about ───────────────────────────────
+const posix = await variant("linux", "linux", noKnobs);
+const wsl = await variant("wsl", "win32", { ...noKnobs, OMNIAGENT_LOCAL: "wsl" });
+const wslSsh = await variant("wslssh", "win32", { ...noKnobs, OMNIAGENT_LOCAL: "wsl", OMNIAGENT_SSH: "wsl" });
+const native = await variant("native", "win32", { ...noKnobs, OMNIAGENT_LOCAL: "native" });
+const detected = await variant("detected", "win32", noKnobs);
+
+const touchesWsl = (c) => JSON.stringify([c.file, c.args]).includes("wsl");
+
+// ── The platform this change was not about ────────────────────────────────
 
 {
   const shell = process.env.SHELL || "/bin/zsh";
@@ -79,29 +115,28 @@ Object.defineProperty(process, "platform", { value: "linux", configurable: true 
     "posix: remote pod is a bare ssh -t",
   );
 
-  const everything = [plain, owned, guest, remote];
   check(
-    everything.every((c) => !JSON.stringify([c.file, c.args]).includes("wsl")),
+    ![plain, owned, guest, remote].some(touchesWsl),
     "posix: nothing anywhere goes near WSL",
   );
 }
 
-// ── Windows: the local machine is the distro ──────────────────────────────
+// ── Windows, a distro installed: the local machine is the distro ──────────
 
 {
-  const owned = launch(win, { session: "sess" });
-  check(owned.file === "wsl.exe", "win: local pod is launched through wsl.exe");
+  const owned = launch(wsl, { session: "sess" });
+  check(owned.file === "wsl.exe", "wsl: local pod is launched through wsl.exe");
   check(
     owned.args.slice(0, 3).join(" ") === "-e sh -lc",
-    "win: -e so wsl hands the argv over instead of reparsing it",
+    "wsl: -e so wsl hands the argv over instead of reparsing it",
   );
   check(
     owned.command.includes(`cd "$HOME"`),
-    "win: pod starts in the distro's home, not the /mnt/c the launcher was in",
+    "wsl: pod starts in the distro's home, not the /mnt/c the launcher was in",
   );
   check(
     /export TERM=xterm-256color COLORTERM=truecolor LANG LC_CTYPE="\$LANG";/.test(owned.command),
-    "win: terminal and locale are exported inside the distro, where they land",
+    "wsl: terminal and locale are exported inside the distro, where they land",
   );
   // A distro that generated only C/C.utf8/POSIX — the stock Ubuntu — must not
   // be told it is en_US.UTF-8. glibc keeps the name and drops to C collation,
@@ -109,29 +144,31 @@ Object.defineProperty(process, "platform", { value: "linux", configurable: true 
   check(
     !owned.command.includes("en_US") &&
       owned.command.includes('case "${LANG:-}" in *[Uu][Tt][Ff]*) ;; *) LANG=C.UTF-8 ;; esac'),
-    "win: keeps the distro's own UTF-8 locale, imposing one only if it has none",
+    "wsl: keeps the distro's own UTF-8 locale, imposing one only if it has none",
   );
   check(
-    owned.command.includes('-e LANG="$LANG"') &&
-      owned.command.includes('-e LC_CTYPE="$LANG"'),
-    "win: the resolved locale is what tmux pins on the session",
+    owned.command.includes('-e LANG="$LANG"') && owned.command.includes('-e LC_CTYPE="$LANG"'),
+    "wsl: the resolved locale is what tmux pins on the session",
   );
   check(
     owned.command.includes("new-session -A -s 'sess'"),
-    "win: local pod still attaches-or-creates its own tmux session",
+    "wsl: local pod still attaches-or-creates its own tmux session",
   );
 
-  const guest = launch(win, { session: "sess", owns: false });
+  const guest = launch(wsl, { session: "sess", owns: false });
   check(
-    guest.command.includes("attach-session -t '=sess'") &&
-      !guest.command.includes("new-session"),
-    "win: guest pod attaches and never recreates",
+    guest.command.includes("attach-session -t '=sess'") && !guest.command.includes("new-session"),
+    "wsl: guest pod attaches and never recreates",
   );
 
-  const remote = launch(win, { host: "srv", session: "sess" });
+  // ssh is Windows' own by default: it is the one that reads the user's
+  // C:\Users\…\.ssh\config, and the tmux it reaches runs on the server. Named
+  // with its extension — node-pty does not add `.exe` the way a shell would,
+  // and a bare `ssh` failed to spawn with "File not found".
+  const remote = launch(wsl, { host: "srv", session: "sess" });
   check(
-    remote.file === "wsl.exe" && remote.args.slice(0, 4).join(" ") === "-e ssh -t srv",
-    "win: remote pods use the distro's ssh, which is the one that has the keys",
+    remote.file === "ssh.exe" && remote.args.slice(0, 2).join(" ") === "-t srv",
+    "wsl: remote pod is native ssh.exe -t, not the distro's",
   );
 
   // The whole point of routing local pods through the remote path: one command
@@ -139,7 +176,75 @@ Object.defineProperty(process, "platform", { value: "linux", configurable: true 
   const posixRemote = launch(posix, { host: "srv", session: "sess" });
   check(
     remote.command === posixRemote.command,
-    "win: a remote pod is sent the same command every other platform sends",
+    "wsl: a remote pod is sent the same command every other platform sends",
+  );
+
+  // …and for anyone whose keys live in the distro, OMNIAGENT_SSH=wsl.
+  const viaDistro = launch(wslSsh, { host: "srv", session: "sess" });
+  check(
+    viaDistro.file === "wsl.exe" && viaDistro.args.slice(0, 4).join(" ") === "-e ssh -t srv",
+    "wsl: OMNIAGENT_SSH=wsl routes ssh through the distro instead",
+  );
+}
+
+// ── Windows, no distro: PowerShell pods, native everything ────────────────
+
+{
+  const plain = launch(native);
+  check(
+    /^(pwsh|powershell)\.exe$/.test(plain.file) && plain.args.join(" ") === "-NoLogo",
+    "native: bare pod is PowerShell",
+  );
+
+  // A session name is still handed down (the layout carries one), but there is
+  // nothing to attach it to, so the pod is the same plain shell.
+  const owned = launch(native, { session: "sess" });
+  check(
+    owned.file === plain.file && owned.args.join(" ") === "-NoLogo",
+    "native: a session name changes nothing — there is no tmux to restore from",
+  );
+
+  const guest = launch(native, { session: "sess", owns: false });
+  check(
+    guest.file === plain.file &&
+      guest.args.includes("-Command") &&
+      guest.command.includes("tmux session sess is gone") &&
+      guest.command.includes("exit 1"),
+    "native: guest pod says the session is gone and exits, as attachOnly does",
+  );
+
+  const remote = launch(native, { host: "srv", session: "sess" });
+  check(
+    remote.file === "ssh.exe" && remote.args.slice(0, 2).join(" ") === "-t srv",
+    "native: remote pod is native ssh.exe -t",
+  );
+  check(
+    remote.command === launch(posix, { host: "srv", session: "sess" }).command,
+    "native: remote pod gets the same command every other platform sends",
+  );
+
+  check(
+    ![plain, owned, guest, remote].some(touchesWsl),
+    "native: nothing anywhere goes near WSL",
+  );
+
+  // The tmux helpers answer for a native local machine without spawning.
+  const sessions = await native.listTmuxSessions(null);
+  check(
+    Array.isArray(sessions.sessions) && sessions.sessions.length === 0 && sessions.machine.length > 0,
+    "native: local tmux sessions are none, on a machine with a name",
+  );
+  check((await native.tmuxSessionStarted(null, "sess")) === null, "native: no session start time");
+  check((await native.renameTmuxSession(null, "a", "b")) === false, "native: rename is refused");
+}
+
+// ── Windows, nothing forced: starts native until detection says otherwise ─
+
+{
+  const plain = launch(detected);
+  check(
+    /^(pwsh|powershell)\.exe$/.test(plain.file),
+    "detected: with no knobs set the synchronous default is native",
   );
 }
 

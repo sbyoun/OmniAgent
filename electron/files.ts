@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { homedir } from "node:os";
+import { cpus, freemem, homedir, hostname, totalmem } from "node:os";
 import { join } from "node:path";
-import { LOCAL_IS_WSL, onLocalMachine, run, SSH_OPTS } from "./local";
+import { localIsNativeWindows, localIsWsl, onLocalMachine, run, sshArgv, SSH_OPTS } from "./local";
 
 /**
  * Where the layout lives. Both shells write the same path on purpose: the
@@ -50,18 +50,18 @@ const shellQuote = (path: string) => `'${path.replace(/'/g, `'\\''`)}'`;
 /**
  * Whether `host: null` can be answered by this process's own filesystem.
  *
- * On macOS and Linux it always can, and every local call below is the plain
- * `fs` call it has always been. On Windows it never can: the local machine is
- * the WSL distro, and `/home/you/project` is not a path Win32 can open. Those
+ * On macOS, Linux and a Windows without WSL it can, and every local call below
+ * is the plain `fs` call it has always been. When the local machine is a WSL
+ * distro it cannot: `/home/you/project` is not a path Win32 can open. Those
  * take the same command path as a remote host — `ls`, `cat`, `mkdir` — with
  * wsl.exe standing in for ssh, which is why `run` accepts a null host at all.
  */
-const ownFs = (host: string | null) => !host && !LOCAL_IS_WSL;
+const ownFs = (host: string | null) => !host && !localIsWsl();
 
 /** Pipe `data` into a command's stdin, on the host or on the local machine. */
 function pipe(host: string | null, command: string, data: Buffer): Promise<void> {
   const [file, args] = host
-    ? onLocalMachine("ssh", [...SSH_OPTS, host, command])
+    ? sshArgv([...SSH_OPTS, host, command])
     : onLocalMachine("sh", ["-c", command]);
   return new Promise((resolve, reject) => {
     const child = spawn(file, args);
@@ -242,9 +242,10 @@ export async function homeDir(host: string | null): Promise<string> {
  * ssh pods. Used memory leaves out cached files: on macOS that is Activity
  * Monitor's "Memory Used" (app + wired + compressed), on Linux MemAvailable.
  *
- * A Windows local pod takes the Linux arm, and reports the distro's numbers —
- * which is the honest answer, since the distro is the machine whose CPU the
- * agents in that pod are burning.
+ * A Windows local pod in WSL mode takes the Linux arm, and reports the
+ * distro's numbers — which is the honest answer, since the distro is the
+ * machine whose CPU the agents in that pod are burning. Without a distro there
+ * is no shell to run this in, and `nativeHostStats` asks Node instead.
  */
 const STATS_SNIPPET = `ID=$(cat /etc/machine-id 2>/dev/null)
 [ -z "$ID" ] && ID=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | awk -F'"' '/IOPlatformUUID/{print $4}')
@@ -265,7 +266,39 @@ MA=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
 echo "$C $((MT-MA)) $MT"
 fi`;
 
+/**
+ * The same three numbers for a Windows machine with no shell to compute them
+ * in. CPU is the busy share of every core between two samples 250 ms apart —
+ * the same window the snippet's `sleep 0.25` uses — and memory is what the OS
+ * reports as in use, which on Windows already leaves the standby cache out.
+ * The machine id is the hostname: a local pod has no aliases to group.
+ */
+async function nativeHostStats(): Promise<HostStats> {
+  const sample = () =>
+    cpus().reduce(
+      (acc, c) => {
+        const total = Object.values(c.times).reduce((a, b) => a + b, 0);
+        return { idle: acc.idle + c.times.idle, total: acc.total + total };
+      },
+      { idle: 0, total: 0 },
+    );
+  const a = sample();
+  await new Promise((r) => setTimeout(r, 250));
+  const b = sample();
+  const d = b.total - a.total;
+  const cpu = d <= 0 ? 0 : 100 * (1 - (b.idle - a.idle) / d);
+  const total = Math.round(totalmem() / 1_048_576);
+  const free = Math.round(freemem() / 1_048_576);
+  return {
+    cpu: Math.min(100, Math.max(0, cpu)),
+    mem_used_mb: total - free,
+    mem_total_mb: total,
+    machine: hostname(),
+  };
+}
+
 export async function hostStats(host: string | null): Promise<HostStats> {
+  if (!host && localIsNativeWindows()) return nativeHostStats();
   const out = await run(host, STATS_SNIPPET, "utf8");
   const lines = out.trim().split("\n");
   const [cpu, used, total] = (lines.pop() ?? "").trim().split(/\s+/).map(Number);
