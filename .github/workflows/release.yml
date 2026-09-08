@@ -125,10 +125,14 @@ jobs:
       - uses: actions/checkout@v4
       # Whichever build reaches the release first creates the draft, and
       # electron-builder names it after the bare version with an empty body.
-      - name: Title the release
+      # This job only runs when every build succeeded, so it is also the one
+      # that publishes: `gh release edit` leaves a draft a draft unless told
+      # otherwise, and v0.8.0 sat unpublished with all its assets uploaded.
+      - name: Title and publish the release
         run: |
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "OmniAgent $TAG" --notes-file .github/release-notes.md
+            --title "OmniAgent $TAG" --notes-file .github/release-notes.md \
+            --draft=false --latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
