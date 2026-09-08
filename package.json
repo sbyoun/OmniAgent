@@ -55,7 +55,7 @@
   "description": "A control tower for AI agent fleets across your servers",
   "author": {
     "name": "SunBum Youn",
-    "email": "cjaiproduct@gmail.com"
+    "email": "dmonkey09@gmail.com"
   },
   "build": {
     "appId": "com.sunbumyoun.omniagent",
