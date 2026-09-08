@@ -1,5 +1,6 @@
 import { tauriBackend } from "./ipcTauri";
 import { electronBackend } from "./ipcElectron";
+import { sanitizeTag } from "./clientTag";
 
 /**
  * The frontend is shared by both shells, so it talks to one of these instead
@@ -45,6 +46,20 @@ export interface HostStats {
 }
 
 export const listSshHosts = () => backend.call<SshHost[]>("list_ssh_hosts");
+
+/** This machine's hostname, raw. */
+export const clientName = () => backend.call<string>("client_name");
+
+let tag: Promise<string> | undefined;
+
+/**
+ * This machine's tag for new pods' session names (see clientTag.ts), asked of
+ * the backend once and kept for the life of the page.
+ */
+export const clientTag = (): Promise<string> =>
+  (tag ??= clientName()
+    .then(sanitizeTag)
+    .catch(() => "client"));
 
 export const ptySpawn = (
   id: string,

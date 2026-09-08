@@ -18,7 +18,8 @@
     "test:ime": "esbuild src/ime.ts --bundle --format=esm --external:@xterm/xterm --outfile=dist-test/ime.mjs --log-level=error && node tests/ime.test.mjs",
     "test:pty": "esbuild electron/pty.ts --bundle --format=esm --platform=node --external:node-pty --external:electron --outfile=dist-test/pty.mjs --log-level=error && node tests/pty-session.test.mjs",
     "test:argv": "esbuild electron/pty.ts --bundle --format=esm --platform=node --alias:node-pty=./tests/stub-node-pty.mjs --external:electron --outfile=dist-test/pty-argv.mjs --log-level=error && node tests/wsl-argv.test.mjs",
-    "test": "npm run test:ime && npm run test:argv && npm run test:pty"
+    "test:tag": "esbuild src/clientTag.ts --bundle --format=esm --outfile=dist-test/clientTag.mjs --log-level=error && node tests/client-tag.test.mjs",
+    "test": "npm run test:ime && npm run test:argv && npm run test:pty && npm run test:tag"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",

@@ -17,6 +17,7 @@ import {
   setPodBorderMenu,
   shellName,
   SshHost,
+  clientTag,
 } from "./ipc";
 import { startWindowDrag } from "./window";
 import { HostStats, subscribeHostStats } from "./hostStats";
@@ -188,11 +189,22 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  const openPod = (host: string | null, session?: string) => {
+  /**
+   * Open a pod: a new one on `host`, or — given `existing` — a guest onto a
+   * session something else started. A new pod's session is named here and
+   * saved with it, `omniagent-<this machine>-pod-N`, so two clients sharing a
+   * server never derive the same name from their own counters (see
+   * clientTag.ts). Pods from before carry no `session` and keep deriving the
+   * old `omniagent-pod-N` from their id.
+   */
+  const openPod = async (host: string | null, existing?: string) => {
+    const tag = await clientTag();
     const api = apiRef.current;
     if (!api) return;
     podCounter += 1;
-    const name = session?.replace(/^omniagent-/, "");
+    const guest = existing !== undefined;
+    const session = existing ?? `omniagent-${tag}-pod-${podCounter}`;
+    const name = existing?.replace(/^omniagent-/, "");
     api.addPanel<PodParams>({
       id: `pod-${podCounter}`,
       component: "terminal",
@@ -200,14 +212,14 @@ export default function App() {
       title: host ? `[${host.toUpperCase()}]` : "[LOCAL]",
       params: {
         host,
-        label: session
+        label: guest
           ? `${host ?? "local"} · ${name}`
           : host
             ? `${host} · SSH`
             : "LOCAL · SHELL",
         status: "connecting",
         session,
-        guest: session !== undefined,
+        guest,
       },
       // Split right of the active group so pods tile into a grid instead of
       // stacking as tabs.

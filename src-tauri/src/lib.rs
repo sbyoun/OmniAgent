@@ -123,6 +123,20 @@ fn set_font_menu(app: AppHandle, options: Vec<FontOption>, selected: String) {
     }
 }
 
+/// This machine's hostname, raw. The frontend turns it into the tag new pods
+/// carry in their tmux session names (see src/clientTag.ts); the Electron
+/// shell answers the same call from `os.hostname()`, and the two must agree
+/// since they share the layout. `hostname` exists on every platform the app
+/// builds for; an empty answer lets the frontend fall back.
+#[tauri::command]
+fn client_name() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -150,6 +164,7 @@ pub fn run() {
         .manage(pty::PtyManager::default())
         .invoke_handler(tauri::generate_handler![
             ssh_config::list_ssh_hosts,
+            client_name,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

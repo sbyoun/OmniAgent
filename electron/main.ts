@@ -6,6 +6,7 @@ import {
   ipcMain,
   shell,
 } from "electron";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import * as files from "./files";
 import {
@@ -249,6 +250,8 @@ app.on("before-quit", killAllPtys);
 
 function registerHandlers() {
   ipcMain.handle("list_ssh_hosts", () => listSshHosts());
+  // Raw; the renderer turns it into the session-name tag (src/clientTag.ts).
+  ipcMain.handle("client_name", () => hostname());
   // "posix" | "wsl" | "native" — so the UI can say when a local pod will not
   // restore its content (native: no tmux behind it).
   ipcMain.handle("local_mode", () => localMode());
