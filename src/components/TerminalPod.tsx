@@ -161,11 +161,33 @@ export interface PodParams {
  * the program pointed.
  */
 const SERVER_URL_RE =
-  /(?:https?:\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})(\/[^\s'"<>)\]]*)?/g;
+  /(?:([a-z]+):\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})(\/[\w\-.~%/?#&=+:@!*,;]*)?/g;
+/** Schemes a browser can open; a `ws://` is a socket a page uses, not a page. */
+const BROWSER_SCHEMES = new Set(["http", "https", undefined]);
 
 /** Where to connect to, as seen from the machine that printed the address. */
 const targetOf = (printed: string) =>
   /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\])$/.test(printed) ? "localhost" : printed;
+
+/**
+ * One match of SERVER_URL_RE as the parts the pod needs. The path is only
+ * URL characters (ASCII — a Korean particle glued to the end of an address
+ * in a sentence is prose, not path), and sentence punctuation that trails
+ * it is dropped: `…/duck/.` ends a sentence, not a URL. `raw` is the text
+ * actually treated as the address, for the link's extent.
+ */
+function parseServerUrl(m: RegExpMatchArray) {
+  if (!BROWSER_SCHEMES.has(m[1])) return null;
+  const printedPath = m[4] ?? "";
+  // Trailing `*` is markdown emphasis closing around the address.
+  const path = printedPath.replace(/[.,;:!?*]+$/, "");
+  return {
+    raw: m[0].slice(0, m[0].length - (printedPath.length - path.length)),
+    target: targetOf(m[2]),
+    port: Number(m[3]),
+    path: path || "/",
+  };
+}
 const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
 /**
@@ -880,12 +902,13 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       const text = (outputTail + data).replace(ANSI_RE, "");
       outputTail = text.slice(-120);
       for (const m of text.matchAll(SERVER_URL_RE)) {
-        const target = targetOf(m[1]);
-        const port = Number(m[2]);
+        const parsed = parseServerUrl(m);
+        if (!parsed) continue;
+        const { target, port, path } = parsed;
         const id = `${target}:${port}`;
         if (port < 1 || port > 65535 || offeredPortsRef.current.has(id)) continue;
         offeredPortsRef.current.add(id);
-        setPortPrompt({ target, port, path: m[3] ?? "/" });
+        setPortPrompt({ target, port, path });
         break;
       }
     };
@@ -1067,11 +1090,10 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
         const text = line?.translateToString(true) ?? "";
         const links: ILink[] = [];
         for (const m of text.matchAll(SERVER_URL_RE)) {
-          const raw = m[0];
+          const parsed = parseServerUrl(m);
+          if (!parsed) continue;
+          const { raw, target, port, path } = parsed;
           const start = m.index ?? 0;
-          const target = targetOf(m[1]);
-          const port = Number(m[2]);
-          const path = m[3] ?? "/";
           links.push({
             range: {
               start: { x: start + 1, y: lineNumber },
