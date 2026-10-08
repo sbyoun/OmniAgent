@@ -15,8 +15,6 @@ import {
   fsStat,
   fsUpload,
   openExternal,
-  portForwardClose,
-  portForwardOpen,
   tmuxRenameSession,
   tmuxSelectWindow,
   tmuxSessions,
@@ -31,6 +29,7 @@ import {
 import { HostStats, subscribeHostStats } from "../hostStats";
 import { activeFont, primaryFamily, useSettings } from "../settings";
 import { setupImeInput } from "../ime";
+import { closeForward, localUrl, openForward, releaseForwards, useForwards } from "../forwards";
 import { Explorer } from "./Explorer";
 import { EditorPanel } from "./EditorPanel";
 
@@ -142,19 +141,6 @@ export interface PodParams {
   /** Pane sizes, dragged by the splitters. */
   explorerWidth?: number;
   editorHeight?: number;
-  /**
-   * ssh tunnels this pod opened to ports on its server, shown as chips in the
-   * header. Live state only: tunnels die with the app, so the pod clears the
-   * list when it (re)connects and asks again when it sees the URL again.
-   */
-  forwards?: PortForward[];
-}
-
-export interface PortForward {
-  /** The port on the server, as the program printed it. */
-  remote: number;
-  /** Where it is reachable on this machine — the same number when it was free. */
-  local: number;
 }
 
 /**
@@ -286,8 +272,9 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
     explorerOpen,
     editorOpen,
     windows = [],
-    forwards = [],
   } = props.params;
+  // The tunnels this pod asked for, from the shared registry (src/forwards.ts).
+  const forwards = useForwards().filter((f) => f.pods.includes(props.api.id));
   const [renaming, setRenaming] = useState(false);
   const [maximized, setMaximized] = useState(false);
   const [stats, setStats] = useState<HostStats | null>(null);
@@ -422,19 +409,14 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
               >
                 <span
                   className="cursor-pointer hover:underline"
-                  onClick={() => void openExternal(`http://localhost:${f.local}/`)}
+                  onClick={() => void openExternal(localUrl(f))}
                 >
                   ⇄ {f.remote}
                 </span>
                 <span
                   className="material-symbols-outlined text-[12px] cursor-pointer opacity-60 hover:opacity-100"
                   title="Close the tunnel"
-                  onClick={() => {
-                    if (props.params.host) void portForwardClose(props.params.host, f.remote).catch(() => {});
-                    props.api.updateParameters({
-                      forwards: forwards.filter((x) => x.remote !== f.remote),
-                    });
-                  }}
+                  onClick={() => void closeForward(f.host, f.remote)}
                 >
                   close
                 </span>
@@ -587,16 +569,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
    * shows it and the pod can close it later.
    */
   const openPort = async (port: number, path = "/") => {
-    let local = port;
-    if (host) {
-      const have = (props.params.forwards ?? []).find((f) => f.remote === port);
-      local = have?.local ?? (await portForwardOpen(host, port));
-      if (!have) {
-        props.api.updateParameters({
-          forwards: [...(props.params.forwards ?? []), { remote: port, local }],
-        });
-      }
-    }
+    const local = host ? await openForward(host, port, props.api.id) : port;
     await openExternal(`http://localhost:${local}${path || "/"}`);
   };
   /** Re-attaches this pod. Owned by the terminal effect, called by the banner. */
@@ -892,9 +865,8 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
 
     const connect = async () => {
       setDropped(null);
-      // Tunnels and offers belong to a connection: a restored layout carries
-      // forwards whose ssh processes died with the last app, and every port
-      // deserves one fresh offer per attach.
+      // Offers belong to a connection: every port deserves one fresh offer
+      // per attach.
       offeredPortsRef.current = new Set();
       setPortPrompt(null);
       outputTail = "";
@@ -906,7 +878,6 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
         status: "connecting",
         dropped: false,
         windows: [],
-        forwards: [],
       });
       spawnedAt = Date.now();
       try {
@@ -1153,10 +1124,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       ime.dispose();
       focusDispose.dispose();
       unlisteners.forEach((u) => u());
-      if (host) {
-        for (const f of props.params.forwards ?? [])
-          portForwardClose(host, f.remote).catch(() => {});
-      }
+      releaseForwards(podId);
       ptyKill(podId).catch(() => {});
       term.dispose();
     };

@@ -22,6 +22,16 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
   const [preview, setPreview] = useState(false);
   const [copied, setCopied] = useState(false);
   const [imageSrc, setImageSrc] = useState<string | null>(null);
+  /**
+   * Image zoom: "fit" shrinks to the pane (never enlarges), a number is a
+   * scale of the image's own pixels. Reset per file. Trackpad pinch and ⌘/Ctrl
+   * + wheel zoom, double-click toggles fit ↔ 1:1, and a larger-than-pane
+   * image pans by dragging.
+   */
+  const [zoom, setZoom] = useState<number | "fit">("fit");
+  const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
+  const imageBoxRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
   const [pdfSrc, setPdfSrc] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   /**
@@ -44,6 +54,44 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
     };
   }, [pdfSrc]);
 
+  /**
+   * One zoom step in or out. From "fit" the first step starts at the scale the
+   * fit is actually showing, so the image does not jump to 1:1 first. Steps
+   * are multiplicative, 25% each (scaled by `amount` for a pinch), clamped to
+   * 10%–1600%; a wheel step that would land within 2% of 1:1 snaps to it.
+   */
+  const stepZoom = (dir: 1 | -1, amount = 1) => {
+    setZoom((z) => {
+      let current = typeof z === "number" ? z : 1;
+      if (z === "fit" && natural && imageBoxRef.current) {
+        const box = imageBoxRef.current;
+        current = Math.min(1, (box.clientWidth - 24) / natural.w, (box.clientHeight - 24) / natural.h);
+      }
+      const factor = 1 + 0.25 * amount;
+      let next = dir > 0 ? current * factor : current / factor;
+      if (Math.abs(next - 1) < 0.02) next = 1;
+      return Math.min(16, Math.max(0.1, next));
+    });
+  };
+
+  // React registers wheel listeners as passive, so preventDefault from an
+  // onWheel prop cannot stop Chromium's own pinch handling; the listener is
+  // attached by hand, non-passive. Pinch arrives as a wheel with ctrlKey; ⌘ or
+  // Ctrl + wheel is the same gesture on a mouse. A plain wheel scrolls.
+  const stepZoomRef = useRef(stepZoom);
+  stepZoomRef.current = stepZoom;
+  useEffect(() => {
+    const box = imageBoxRef.current;
+    if (!box) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      stepZoomRef.current(e.deltaY < 0 ? 1 : -1, Math.min(1, Math.abs(e.deltaY) / 50));
+    };
+    box.addEventListener("wheel", onWheel, { passive: false });
+    return () => box.removeEventListener("wheel", onWheel);
+  }, [imageSrc]);
+
   const isMarkdown = !!path && /\.(md|markdown|mdx)$/i.test(path);
   const imageType = path ? imageMime(path) : null;
   const isPdf = !!path && /\.pdf$/i.test(path);
@@ -54,6 +102,8 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
     if (!path) return;
     setContent(null);
     setImageSrc(null);
+    setZoom("fit");
+    setNatural(null);
     setPdfSrc((old) => {
       // Object URLs hold the bytes until they are let go.
       if (old) URL.revokeObjectURL(old);
@@ -191,6 +241,31 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
               saved to {saved}
             </span>
           )}
+          {path && imageType && imageSrc && (
+            <>
+              <span
+                className="material-symbols-outlined text-[14px] cursor-pointer text-on-surface-variant hover:text-on-surface"
+                title="Zoom out — or pinch / ⌘ + wheel"
+                onClick={() => stepZoom(-1)}
+              >
+                zoom_out
+              </span>
+              <button
+                className="font-mono text-[10px] text-on-surface-variant hover:text-on-surface min-w-[36px] text-center"
+                title={zoom === "fit" ? "Fit to pane — click for 1:1" : "Click to fit the pane"}
+                onClick={() => setZoom((z) => (z === "fit" ? 1 : "fit"))}
+              >
+                {zoom === "fit" ? "fit" : `${Math.round(zoom * 100)}%`}
+              </button>
+              <span
+                className="material-symbols-outlined text-[14px] cursor-pointer text-on-surface-variant hover:text-on-surface"
+                title="Zoom in — or pinch / ⌘ + wheel"
+                onClick={() => stepZoom(1)}
+              >
+                zoom_in
+              </span>
+            </>
+          )}
           {path && isMarkdown && !readOnly && (
             <span
               className={`material-symbols-outlined text-[14px] cursor-pointer ${
@@ -298,12 +373,44 @@ export function EditorPanel({ host, path, onClose, height }: Props) {
           )
         ) : imageType ? (
           imageSrc ? (
-            <div className="h-full overflow-auto bg-surface-container-lowest flex items-center justify-center p-3">
-              <img
-                src={imageSrc}
-                alt={path ?? ""}
-                className="max-w-full max-h-full object-contain"
-              />
+            <div
+              ref={imageBoxRef}
+              className={`h-full overflow-auto bg-surface-container-lowest select-none ${
+                zoom === "fit" ? "" : "cursor-grab active:cursor-grabbing"
+              }`}
+              onDoubleClick={() => setZoom((z) => (z === "fit" ? 1 : "fit"))}
+              onMouseDown={(e) => {
+                const box = imageBoxRef.current;
+                if (!box || zoom === "fit" || e.button !== 0) return;
+                dragRef.current = { x: e.clientX, y: e.clientY, left: box.scrollLeft, top: box.scrollTop };
+              }}
+              onMouseMove={(e) => {
+                const d = dragRef.current;
+                const box = imageBoxRef.current;
+                if (!d || !box) return;
+                box.scrollLeft = d.left - (e.clientX - d.x);
+                box.scrollTop = d.top - (e.clientY - d.y);
+              }}
+              onMouseUp={() => (dragRef.current = null)}
+              onMouseLeave={() => (dragRef.current = null)}
+            >
+              {/* min-w/h-full keeps a small image centred; a large one scrolls. */}
+              <div className="inline-flex min-w-full min-h-full items-center justify-center p-3">
+                <img
+                  src={imageSrc}
+                  alt={path ?? ""}
+                  draggable={false}
+                  onLoad={(e) =>
+                    setNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })
+                  }
+                  className={zoom === "fit" ? "max-w-full max-h-full object-contain" : "max-w-none"}
+                  style={
+                    zoom === "fit" || !natural
+                      ? undefined
+                      : { width: natural.w * zoom, height: natural.h * zoom }
+                  }
+                />
+              </div>
             </div>
           ) : (
             <div className="p-3 text-outline text-[11px] font-mono">loading…</div>

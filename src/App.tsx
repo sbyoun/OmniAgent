@@ -24,6 +24,8 @@ import { HostStats, subscribeHostStats } from "./hostStats";
 import { fontOptions, selectFont, setSetting, useSettings } from "./settings";
 import { PodParams, PodTab, TerminalPod } from "./components/TerminalPod";
 import { Sessions } from "./components/Sessions";
+import { Ports } from "./components/Ports";
+import { useForwards } from "./forwards";
 import { FontManager } from "./components/FontManager";
 
 const components = { terminal: TerminalPod };
@@ -50,7 +52,8 @@ interface FleetSummary {
 
 export default function App() {
   const [hosts, setHosts] = useState<SshHost[]>([]);
-  const [sidebar, setSidebar] = useState<"fleet" | "sessions" | null>("fleet");
+  const [sidebar, setSidebar] = useState<"fleet" | "sessions" | "ports" | null>("fleet");
+  const forwardCount = useForwards().length;
   const [podCount, setPodCount] = useState(0);
   const [fleet, setFleet] = useState<FleetSummary>({
     working: 0,
@@ -388,6 +391,22 @@ export default function App() {
             <span className="material-symbols-outlined">lan</span>
           </button>
           <button
+            className={`relative flex items-center justify-center w-full py-2 border-l-2 ${
+              sidebar === "ports"
+                ? "text-primary border-primary"
+                : "text-on-surface-variant border-transparent hover:text-on-surface"
+            }`}
+            title="Forwarded ports"
+            onClick={() => setSidebar((v) => (v === "ports" ? null : "ports"))}
+          >
+            <span className="material-symbols-outlined">swap_horiz</span>
+            {forwardCount > 0 && (
+              <span className="absolute top-1 right-2 min-w-[14px] h-[14px] px-1 rounded-full bg-secondary text-on-secondary text-[9px] font-semibold leading-[14px] text-center">
+                {forwardCount}
+              </span>
+            )}
+          </button>
+          <button
             className="flex items-center justify-center w-full py-2 text-on-surface-variant hover:text-on-surface border-l-2 border-transparent"
             title="New local terminal"
             onClick={() => openPod(null)}
@@ -453,6 +472,11 @@ export default function App() {
                   )
                 }
               />
+            </aside>
+          )}
+          {sidebar === "ports" && (
+            <aside className="w-sidebar-width shrink-0 bg-surface-container-lowest border-r border-surface-container-highest flex flex-col">
+              <Ports />
             </aside>
           )}
           {sidebar === "fleet" && (
