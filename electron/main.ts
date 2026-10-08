@@ -23,6 +23,7 @@ import {
   writePty,
 } from "./pty";
 import { listSshHosts } from "./sshConfig";
+import { closeAllForwards, closeForward, openForward } from "./forward";
 import { detectLocal, localMode } from "./local";
 
 /** Vite dev server, when running `npm run dev`. */
@@ -246,7 +247,10 @@ app.on("window-all-closed", () => {
 
 // Leave the tmux sessions running — they are what the next launch restores —
 // but never leave stray ssh/shell clients behind.
-app.on("before-quit", killAllPtys);
+app.on("before-quit", () => {
+  killAllPtys();
+  closeAllForwards();
+});
 
 function registerHandlers() {
   ipcMain.handle("list_ssh_hosts", () => listSshHosts());
@@ -325,6 +329,12 @@ function registerHandlers() {
     "tmux_select_window",
     (_e, host: string | null, session: string, index: number) =>
       selectTmuxWindow(host, session, index),
+  );
+  ipcMain.handle("port_forward_open", (_e, host: string, remote: number) =>
+    openForward(host, remote),
+  );
+  ipcMain.handle("port_forward_close", (_e, host: string, remote: number) =>
+    closeForward(host, remote),
   );
   ipcMain.handle("open_external", (_e, url: string) =>
     /^https?:/i.test(url) ? shell.openExternal(url) : undefined,

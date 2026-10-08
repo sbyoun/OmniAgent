@@ -47,6 +47,8 @@ const ORDER: Record<string, string[]> = {
   host_stats: ["host"],
   layout_write: ["content"],
   open_external: ["url"],
+  port_forward_open: ["host", "remote"],
+  port_forward_close: ["host", "remote"],
   tmux_sessions: ["host"],
   tmux_kill_session: ["host", "name"],
   tmux_rename_session: ["host", "from", "to"],

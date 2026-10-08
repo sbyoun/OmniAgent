@@ -14,6 +14,9 @@ import {
   fsMkdir,
   fsStat,
   fsUpload,
+  openExternal,
+  portForwardClose,
+  portForwardOpen,
   tmuxRenameSession,
   tmuxSelectWindow,
   tmuxSessions,
@@ -139,7 +142,30 @@ export interface PodParams {
   /** Pane sizes, dragged by the splitters. */
   explorerWidth?: number;
   editorHeight?: number;
+  /**
+   * ssh tunnels this pod opened to ports on its server, shown as chips in the
+   * header. Live state only: tunnels die with the app, so the pod clears the
+   * list when it (re)connects and asks again when it sees the URL again.
+   */
+  forwards?: PortForward[];
 }
+
+export interface PortForward {
+  /** The port on the server, as the program printed it. */
+  remote: number;
+  /** Where it is reachable on this machine — the same number when it was free. */
+  local: number;
+}
+
+/**
+ * A server announcing itself: `http://localhost:5173/`, `127.0.0.1:8000`,
+ * `0.0.0.0:3000`, `[::1]:8080`. Only with an explicit port — a bare
+ * `localhost` is a word, not a server. The path, when printed, rides along so
+ * the browser lands where the program pointed.
+ */
+const LOCAL_URL_RE =
+  /(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d{2,5})(\/[^\s'"<>)\]]*)?/g;
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
 /**
  * The bar between two panes. Dragging it resizes the one before it; the
@@ -260,6 +286,7 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
     explorerOpen,
     editorOpen,
     windows = [],
+    forwards = [],
   } = props.params;
   const [renaming, setRenaming] = useState(false);
   const [maximized, setMaximized] = useState(false);
@@ -383,6 +410,38 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
           `running` because a dropped client's last list is stale and its
           clicks would go nowhere.
         */}
+        {/* Tunnels this pod opened: click to open the browser on it, × to close it. */}
+        {status === "running" && forwards.length > 0 && (
+          <div className="flex items-center gap-1 shrink-0">
+            {forwards.map((f) => (
+              <span
+                key={f.remote}
+                title={`localhost:${f.remote} on the server → localhost:${f.local} here`}
+                onMouseDown={guard}
+                className="flex items-center gap-0.5 font-mono text-[10px] leading-none pl-1.5 pr-1 py-1 rounded bg-secondary/15 text-secondary"
+              >
+                <span
+                  className="cursor-pointer hover:underline"
+                  onClick={() => void openExternal(`http://localhost:${f.local}/`)}
+                >
+                  ⇄ {f.remote}
+                </span>
+                <span
+                  className="material-symbols-outlined text-[12px] cursor-pointer opacity-60 hover:opacity-100"
+                  title="Close the tunnel"
+                  onClick={() => {
+                    if (props.params.host) void portForwardClose(props.params.host, f.remote).catch(() => {});
+                    props.api.updateParameters({
+                      forwards: forwards.filter((x) => x.remote !== f.remote),
+                    });
+                  }}
+                >
+                  close
+                </span>
+              </span>
+            ))}
+          </div>
+        )}
         {status === "running" && windows.length > 1 && (
           <div className="flex items-center gap-1 min-w-0 overflow-hidden">
             {windows.map((w) => (
@@ -511,6 +570,35 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
    * server said so, `unreachable` when nothing answered. Null while connected.
    */
   const [dropped, setDropped] = useState<"alive" | "unreachable" | null>(null);
+  /** A server the pod just announced, awaiting the user's yes or no. */
+  const [portPrompt, setPortPrompt] = useState<{
+    port: number;
+    path: string;
+    busy?: boolean;
+    error?: string;
+  } | null>(null);
+  /** Ports already offered this connection — once each, not on every reprint. */
+  const offeredPortsRef = useRef<Set<number>>(new Set());
+
+  /**
+   * Open the browser on a port the pod's server is listening on. Remote pods
+   * get an ssh tunnel first (reused when one is up); a local pod's localhost
+   * is already this machine's. The tunnel is recorded on the pod so the header
+   * shows it and the pod can close it later.
+   */
+  const openPort = async (port: number, path = "/") => {
+    let local = port;
+    if (host) {
+      const have = (props.params.forwards ?? []).find((f) => f.remote === port);
+      local = have?.local ?? (await portForwardOpen(host, port));
+      if (!have) {
+        props.api.updateParameters({
+          forwards: [...(props.params.forwards ?? []), { remote: port, local }],
+        });
+      }
+    }
+    await openExternal(`http://localhost:${local}${path || "/"}`);
+  };
   /** Re-attaches this pod. Owned by the terminal effect, called by the banner. */
   const reconnectRef = useRef<(() => void) | null>(null);
 
@@ -782,8 +870,34 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
      * after it. The pod id does not change, so the backend supersedes the dead
      * client and the listeners below keep feeding this same terminal.
      */
+    /**
+     * Notice a server announcing itself in the output and offer to open it.
+     * Chunks split anywhere, so a short tail of the previous one is kept in
+     * front. The first moments after a connect are skipped on purpose: tmux
+     * replays the screen then, and a URL printed an hour ago is not news.
+     */
+    let outputTail = "";
+    const watchForServers = (data: string) => {
+      if (Date.now() - spawnedAt < 2500) return;
+      const text = (outputTail + data).replace(ANSI_RE, "");
+      outputTail = text.slice(-120);
+      for (const m of text.matchAll(LOCAL_URL_RE)) {
+        const port = Number(m[1]);
+        if (port < 1 || port > 65535 || offeredPortsRef.current.has(port)) continue;
+        offeredPortsRef.current.add(port);
+        setPortPrompt({ port, path: m[2] ?? "/" });
+        break;
+      }
+    };
+
     const connect = async () => {
       setDropped(null);
+      // Tunnels and offers belong to a connection: a restored layout carries
+      // forwards whose ssh processes died with the last app, and every port
+      // deserves one fresh offer per attach.
+      offeredPortsRef.current = new Set();
+      setPortPrompt(null);
+      outputTail = "";
       // Drop the window list with the old client: a layout restored from disk
       // carries the last session's windows, and they must not be shown as this
       // one's. tmux pushes the real list the moment the client attaches.
@@ -792,6 +906,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
         status: "connecting",
         dropped: false,
         windows: [],
+        forwards: [],
       });
       spawnedAt = Date.now();
       try {
@@ -885,6 +1000,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
           if (id !== podId) return;
           term.write(data);
           trackActivity(data);
+          watchForServers(data);
         }),
       );
       unlisteners.push(
@@ -952,9 +1068,30 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
         const line = term.buffer.active.getLine(lineNumber - 1);
         const text = line?.translateToString(true) ?? "";
         const links: ILink[] = [];
+        for (const m of text.matchAll(LOCAL_URL_RE)) {
+          const raw = m[0];
+          const start = m.index ?? 0;
+          const port = Number(m[1]);
+          const path = m[2] ?? "/";
+          links.push({
+            range: {
+              start: { x: start + 1, y: lineNumber },
+              end: { x: start + raw.length, y: lineNumber },
+            },
+            text: raw,
+            activate: () => {
+              openPort(port, path).catch((e) =>
+                setPortPrompt({ port, path, error: e instanceof Error ? e.message : String(e) }),
+              );
+            },
+          });
+        }
+        const taken = (i: number) =>
+          links.some((l) => i >= l.range.start.x - 1 && i < l.range.end.x);
         for (const m of text.matchAll(PATH_RE)) {
           const raw = m[0];
           const start = m.index ?? 0;
+          if (taken(start)) continue;
           links.push({
             range: {
               start: { x: start + 1, y: lineNumber },
@@ -1016,6 +1153,10 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       ime.dispose();
       focusDispose.dispose();
       unlisteners.forEach((u) => u());
+      if (host) {
+        for (const f of props.params.forwards ?? [])
+          portForwardClose(host, f.remote).catch(() => {});
+      }
       ptyKill(podId).catch(() => {});
       term.dispose();
     };
@@ -1116,8 +1257,63 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
               </button>
             </div>
           )}
-          <div className="flex-1 min-h-0 bg-surface-container-lowest p-1">
+          <div className="relative flex-1 min-h-0 bg-surface-container-lowest p-1">
             <div ref={containerRef} className="h-full w-full" />
+            {/* A server just announced itself: one question, top right, out of
+                the way of the output and gone on either answer. */}
+            {portPrompt && (
+              <div
+                className="absolute top-2 right-3 z-10 flex items-center gap-2 pl-3 pr-2 py-1.5 rounded-lg border border-outline-variant/40 bg-surface-container-high shadow-lg text-[11px]"
+                onMouseDown={(e) => e.stopPropagation()}
+              >
+                <span className="material-symbols-outlined text-[15px] text-secondary shrink-0">
+                  {portPrompt.error ? "error" : "language"}
+                </span>
+                <span className="text-on-surface">
+                  {portPrompt.error ? (
+                    <>
+                      <span className="text-error">Could not reach port {portPrompt.port}</span>
+                      <span className="text-on-surface-variant"> — {portPrompt.error}</span>
+                    </>
+                  ) : (
+                    <>
+                      Open <span className="font-mono">localhost:{portPrompt.port}</span> in your
+                      browser?
+                      {host && (
+                        <span className="text-on-surface-variant"> (tunnelled from {host})</span>
+                      )}
+                    </>
+                  )}
+                </span>
+                {!portPrompt.error && (
+                  <button
+                    disabled={portPrompt.busy}
+                    onClick={() => {
+                      const { port, path } = portPrompt;
+                      setPortPrompt({ port, path, busy: true });
+                      openPort(port, path)
+                        .then(() => setPortPrompt(null))
+                        .catch((e) =>
+                          setPortPrompt({
+                            port,
+                            path,
+                            error: e instanceof Error ? e.message : String(e),
+                          }),
+                        );
+                    }}
+                    className="px-2 py-0.5 rounded bg-primary text-on-primary font-medium hover:opacity-90 disabled:opacity-50"
+                  >
+                    {portPrompt.busy ? "Opening…" : "Open"}
+                  </button>
+                )}
+                <button
+                  onClick={() => setPortPrompt(null)}
+                  className="px-1.5 py-0.5 rounded text-on-surface-variant hover:text-on-surface hover:bg-surface-container-highest"
+                >
+                  {portPrompt.error ? "Dismiss" : "Not now"}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>

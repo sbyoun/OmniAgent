@@ -164,6 +164,16 @@ export const tmuxSelectWindow = (
   index: number,
 ) => backend.call<void>("tmux_select_window", { host, session, index });
 
+/**
+ * Tunnel a port on a pod's server to this machine; resolves with the local
+ * port (the same number when it is free here). Shared per (host, port).
+ */
+export const portForwardOpen = (host: string, remote: number) =>
+  backend.call<number>("port_forward_open", { host, remote });
+
+export const portForwardClose = (host: string, remote: number) =>
+  backend.call<void>("port_forward_close", { host, remote });
+
 /** Hands a link to the user's browser. */
 export const openExternal = (url: string) =>
   backend.call<void>("open_external", { url });

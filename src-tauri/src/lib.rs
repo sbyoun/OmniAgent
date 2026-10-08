@@ -1,3 +1,4 @@
+mod forward;
 mod local;
 mod pty;
 mod remote_fs;
@@ -162,6 +163,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .manage(pty::PtyManager::default())
+        .manage(forward::ForwardManager::default())
         .invoke_handler(tauri::generate_handler![
             ssh_config::list_ssh_hosts,
             client_name,
@@ -189,6 +191,8 @@ pub fn run() {
             remote_fs::fs_stat,
             remote_fs::fs_read_base64,
             remote_fs::host_stats,
+            forward::port_forward_open,
+            forward::port_forward_close,
             set_font_menu,
         ])
         .build(tauri::generate_context!())
@@ -198,6 +202,9 @@ pub fn run() {
                 use tauri::Manager;
                 if let Some(mgr) = app_handle.try_state::<pty::PtyManager>() {
                     pty::kill_all_clients(&mgr);
+                }
+                if let Some(mgr) = app_handle.try_state::<forward::ForwardManager>() {
+                    forward::close_all(&mgr);
                 }
             }
         });
