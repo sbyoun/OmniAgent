@@ -50,6 +50,11 @@ needs-input notifications, and fleet-wide agent instructions are the
 - **On-demand explorer & editor** — toggle a file tree or a Monaco editor inside
   any pod. Remote file access uses one-shot `ssh` commands (your existing keys),
   connected only while you use it. `⌘S` saves straight back to the server.
+- **Paste an image into a remote pod** — a terminal carries keystrokes, not
+  clipboard bytes, so a program on the server that reads the clipboard finds
+  nothing. OmniAgent uploads the image to `~/.omniagent/paste/` on the server
+  and types its path into the pod, which is what Claude Code and friends accept
+  anyway. Local pods are untouched: the program reads your clipboard itself.
 - **Session lifecycle that makes sense** — `exit` ends the session and closes
   the pod; closing a pod kills its backing session; quitting the app preserves
   everything for next launch.

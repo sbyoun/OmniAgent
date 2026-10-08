@@ -11,7 +11,9 @@ import {
 } from "@xterm/addon-clipboard";
 import {
   fsHomeDir,
+  fsMkdir,
   fsStat,
+  fsUpload,
   tmuxRenameSession,
   tmuxSelectWindow,
   tmuxSessions,
@@ -562,13 +564,57 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       term.clearSelection();
       return true;
     };
+    /**
+     * An image pasted into a REMOTE pod. A terminal carries keystrokes, not
+     * clipboard bytes, so a program on the server — Claude Code, say — that
+     * reads "the clipboard" reads the server's and finds nothing; locally the
+     * same program reads this machine's clipboard itself and needs no help.
+     * So for a remote pod the image is uploaded to the server and its path is
+     * typed into the pod, which is the form the program accepts anyway.
+     * Resolves false when this was not a pod the bridge applies to.
+     */
+    const pasteImage = async (blob: Blob): Promise<boolean> => {
+      if (!host) return false;
+      const ext = blob.type.replace(/^image\//, "").replace(/[^a-z0-9]/gi, "") || "png";
+      const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*$/, "").replace("T", "-");
+      try {
+        if (!homeRef.current) homeRef.current = await fsHomeDir(host);
+        const dir = `${homeRef.current.replace(/\/$/, "")}/.omniagent/paste`;
+        // `mkdir` without -p, one level at a time; "exists" is the usual answer.
+        await fsMkdir(host, `${homeRef.current}/.omniagent`).catch(() => {});
+        await fsMkdir(host, dir).catch(() => {});
+        const path = `${dir}/paste-${stamp}.${ext}`;
+        await fsUpload(host, path, await blob.arrayBuffer());
+        // A trailing space so the path is a finished word, like a file dropped
+        // onto a terminal.
+        typeIntoPod(`${path} `);
+      } catch (e) {
+        term.writeln(
+          `\r\n\x1b[31m[OmniAgent] image paste failed: ${e instanceof Error ? e.message : String(e)}\x1b[0m`,
+        );
+      }
+      return true;
+    };
+    // Set once the pty write chain exists below; a paste cannot arrive before.
+    let typeIntoPod: (data: string) => void = () => {};
+
     const pasteClipboard = () => {
-      void navigator.clipboard
-        .readText()
-        .then((text) => {
-          if (text) term.paste(text);
-        })
-        .catch(() => {});
+      void (async () => {
+        if (host) {
+          // An image on the clipboard outranks any text beside it (a copied
+          // screenshot carries no text; a copied web image carries its URL).
+          try {
+            for (const item of await navigator.clipboard.read()) {
+              const type = item.types.find((t) => t.startsWith("image/"));
+              if (type && (await pasteImage(await item.getType(type)))) return;
+            }
+          } catch {
+            // No read permission, or nothing readable — fall through to text.
+          }
+        }
+        const text = await navigator.clipboard.readText().catch(() => "");
+        if (text) term.paste(text);
+      })();
     };
     //
     // xterm keeps a single custom key handler, so the IME bridge's verdict is
@@ -651,6 +697,21 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     };
     el.addEventListener("mousemove", keepSelectionOnHover, true);
     unlisteners.push(() => el.removeEventListener("mousemove", keepSelectionOnHover, true));
+
+    // ⌘V on macOS arrives as a DOM paste event (Edit → Paste), not through the
+    // key handler above; an image in it goes the same way, before xterm's own
+    // paste listener turns it into an empty text paste.
+    const onPaste = (e: ClipboardEvent) => {
+      const image = Array.from(e.clipboardData?.files ?? []).find((f) =>
+        f.type.startsWith("image/"),
+      );
+      if (!image || !host) return;
+      e.preventDefault();
+      e.stopPropagation();
+      void pasteImage(image);
+    };
+    el.addEventListener("paste", onPaste, true);
+    unlisteners.push(() => el.removeEventListener("paste", onPaste, true));
 
     // Reset on every connect, so the "died instantly" rule below judges the
     // latest attempt rather than the pod's whole life.
@@ -848,6 +909,7 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
         ptyWrite(podId, data).catch(() => {}),
       );
     };
+    typeIntoPod = write;
 
     // Under WKWebView the IME reports composed text in a way xterm ignores;
     // the bridge fills that in and stands down where composition events fire,
