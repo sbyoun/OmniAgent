@@ -29,7 +29,14 @@ import {
 import { HostStats, subscribeHostStats } from "../hostStats";
 import { activeFont, primaryFamily, useSettings } from "../settings";
 import { setupImeInput } from "../ime";
-import { closeForward, localUrl, openForward, releaseForwards, useForwards } from "../forwards";
+import {
+  closeForward,
+  farEnd,
+  localUrl,
+  openForward,
+  releaseForwards,
+  useForwards,
+} from "../forwards";
 import { Explorer } from "./Explorer";
 import { EditorPanel } from "./EditorPanel";
 
@@ -145,12 +152,20 @@ export interface PodParams {
 
 /**
  * A server announcing itself: `http://localhost:5173/`, `127.0.0.1:8000`,
- * `0.0.0.0:3000`, `[::1]:8080`. Only with an explicit port — a bare
- * `localhost` is a word, not a server. The path, when printed, rides along so
- * the browser lands where the program pointed.
+ * `0.0.0.0:3000`, `[::1]:8080` — or by an IP address, `http://10.0.0.5:7920/`,
+ * which is what a program bound to the machine's own interface prints, and
+ * which this machine may or may not be able to reach itself. Only with an
+ * explicit port — a bare `localhost` is a word, not a server — and only
+ * numeric hosts: a hostname with a port is more often a docs link than a
+ * server that just started. The path rides along so the browser lands where
+ * the program pointed.
  */
-const LOCAL_URL_RE =
-  /(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]):(\d{2,5})(\/[^\s'"<>)\]]*)?/g;
+const SERVER_URL_RE =
+  /(?:https?:\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|\d{1,3}(?:\.\d{1,3}){3}):(\d{2,5})(\/[^\s'"<>)\]]*)?/g;
+
+/** Where to connect to, as seen from the machine that printed the address. */
+const targetOf = (printed: string) =>
+  /^(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\])$/.test(printed) ? "localhost" : printed;
 const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
 /**
@@ -402,8 +417,8 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
           <div className="flex items-center gap-1 shrink-0">
             {forwards.map((f) => (
               <span
-                key={f.remote}
-                title={`localhost:${f.remote} on the server → localhost:${f.local} here`}
+                key={`${f.target}:${f.remote}`}
+                title={`${f.target}:${f.remote} from ${f.host} → localhost:${f.local} here`}
                 onMouseDown={guard}
                 className="flex items-center gap-0.5 font-mono text-[10px] leading-none pl-1.5 pr-1 py-1 rounded bg-secondary/15 text-secondary"
               >
@@ -411,12 +426,12 @@ export function PodTab(props: IDockviewPanelHeaderProps<PodParams>) {
                   className="cursor-pointer hover:underline"
                   onClick={() => void openExternal(localUrl(f))}
                 >
-                  ⇄ {f.remote}
+                  ⇄ {farEnd(f)}
                 </span>
                 <span
                   className="material-symbols-outlined text-[12px] cursor-pointer opacity-60 hover:opacity-100"
                   title="Close the tunnel"
-                  onClick={() => void closeForward(f.host, f.remote)}
+                  onClick={() => void closeForward(f.host, f.remote, f.target)}
                 >
                   close
                 </span>
@@ -554,13 +569,15 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
   const [dropped, setDropped] = useState<"alive" | "unreachable" | null>(null);
   /** A server the pod just announced, awaiting the user's yes or no. */
   const [portPrompt, setPortPrompt] = useState<{
+    /** `localhost`, or the address the program printed. */
+    target: string;
     port: number;
     path: string;
     busy?: boolean;
     error?: string;
   } | null>(null);
-  /** Ports already offered this connection — once each, not on every reprint. */
-  const offeredPortsRef = useRef<Set<number>>(new Set());
+  /** `target:port` already offered this connection — once each, not on every reprint. */
+  const offeredPortsRef = useRef<Set<string>>(new Set());
 
   /**
    * Open the browser on a port the pod's server is listening on. Remote pods
@@ -568,8 +585,16 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
    * is already this machine's. The tunnel is recorded on the pod so the header
    * shows it and the pod can close it later.
    */
-  const openPort = async (port: number, path = "/") => {
-    const local = host ? await openForward(host, port, props.api.id) : port;
+  const openPort = async (target: string, port: number, path = "/") => {
+    if (!host) {
+      // A local pod printed it, so this machine can reach it as printed.
+      await openExternal(`http://${target}:${port}${path || "/"}`);
+      return;
+    }
+    // Through the server: to its own loopback, or on to the address it
+    // printed — its public IP, a box on its LAN — which the tunnel reaches
+    // from the server's side whether or not this machine could directly.
+    const local = await openForward(host, port, props.api.id, target);
     await openExternal(`http://localhost:${local}${path || "/"}`);
   };
   /** Re-attaches this pod. Owned by the terminal effect, called by the banner. */
@@ -854,11 +879,13 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
       if (Date.now() - spawnedAt < 2500) return;
       const text = (outputTail + data).replace(ANSI_RE, "");
       outputTail = text.slice(-120);
-      for (const m of text.matchAll(LOCAL_URL_RE)) {
-        const port = Number(m[1]);
-        if (port < 1 || port > 65535 || offeredPortsRef.current.has(port)) continue;
-        offeredPortsRef.current.add(port);
-        setPortPrompt({ port, path: m[2] ?? "/" });
+      for (const m of text.matchAll(SERVER_URL_RE)) {
+        const target = targetOf(m[1]);
+        const port = Number(m[2]);
+        const id = `${target}:${port}`;
+        if (port < 1 || port > 65535 || offeredPortsRef.current.has(id)) continue;
+        offeredPortsRef.current.add(id);
+        setPortPrompt({ target, port, path: m[3] ?? "/" });
         break;
       }
     };
@@ -1039,11 +1066,12 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
         const line = term.buffer.active.getLine(lineNumber - 1);
         const text = line?.translateToString(true) ?? "";
         const links: ILink[] = [];
-        for (const m of text.matchAll(LOCAL_URL_RE)) {
+        for (const m of text.matchAll(SERVER_URL_RE)) {
           const raw = m[0];
           const start = m.index ?? 0;
-          const port = Number(m[1]);
-          const path = m[2] ?? "/";
+          const target = targetOf(m[1]);
+          const port = Number(m[2]);
+          const path = m[3] ?? "/";
           links.push({
             range: {
               start: { x: start + 1, y: lineNumber },
@@ -1051,8 +1079,13 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
             },
             text: raw,
             activate: () => {
-              openPort(port, path).catch((e) =>
-                setPortPrompt({ port, path, error: e instanceof Error ? e.message : String(e) }),
+              openPort(target, port, path).catch((e) =>
+                setPortPrompt({
+                  target,
+                  port,
+                  path,
+                  error: e instanceof Error ? e.message : String(e),
+                }),
               );
             },
           });
@@ -1240,15 +1273,21 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
                 <span className="text-on-surface">
                   {portPrompt.error ? (
                     <>
-                      <span className="text-error">Could not reach port {portPrompt.port}</span>
+                      <span className="text-error">
+                        Could not reach {portPrompt.target}:{portPrompt.port}
+                      </span>
                       <span className="text-on-surface-variant"> — {portPrompt.error}</span>
                     </>
                   ) : (
                     <>
-                      Open <span className="font-mono">localhost:{portPrompt.port}</span> in your
-                      browser?
+                      Open{" "}
+                      <span className="font-mono">
+                        {portPrompt.target}:{portPrompt.port}
+                        {portPrompt.path !== "/" && portPrompt.path}
+                      </span>{" "}
+                      in your browser?
                       {host && (
-                        <span className="text-on-surface-variant"> (tunnelled from {host})</span>
+                        <span className="text-on-surface-variant"> (tunnelled via {host})</span>
                       )}
                     </>
                   )}
@@ -1257,12 +1296,13 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
                   <button
                     disabled={portPrompt.busy}
                     onClick={() => {
-                      const { port, path } = portPrompt;
-                      setPortPrompt({ port, path, busy: true });
-                      openPort(port, path)
+                      const { target, port, path } = portPrompt;
+                      setPortPrompt({ target, port, path, busy: true });
+                      openPort(target, port, path)
                         .then(() => setPortPrompt(null))
                         .catch((e) =>
                           setPortPrompt({
+                            target,
                             port,
                             path,
                             error: e instanceof Error ? e.message : String(e),

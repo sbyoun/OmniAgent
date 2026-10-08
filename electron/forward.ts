@@ -19,7 +19,13 @@ interface Forward {
 }
 
 const forwards = new Map<string, Forward>();
-const key = (host: string, remote: number) => `${host}:${remote}`;
+/**
+ * `target` is where the far end of the tunnel connects FROM the server:
+ * `localhost` for a port the server itself listens on, or an address the
+ * server can reach and this machine may not — a program announcing itself
+ * by the server's own IP, a service on the server's LAN.
+ */
+const key = (host: string, target: string, remote: number) => `${host}:${target}:${remote}`;
 
 /** The same port number when it is free here — the URL then reads the same — else any. */
 function freePort(prefer: number): Promise<number> {
@@ -57,9 +63,13 @@ function waitForPort(port: number, gaveUp: () => boolean, timeoutMs: number): Pr
   });
 }
 
-/** Open (or reuse) a tunnel to `remote` on `host`; resolves with the local port. */
-export async function openForward(host: string, remote: number): Promise<number> {
-  const k = key(host, remote);
+/** Open (or reuse) a tunnel through `host` to `target:remote`; resolves with the local port. */
+export async function openForward(
+  host: string,
+  remote: number,
+  target = "localhost",
+): Promise<number> {
+  const k = key(host, target, remote);
   const have = forwards.get(k);
   if (have && have.proc.exitCode === null) return have.local;
 
@@ -76,7 +86,7 @@ export async function openForward(host: string, remote: number): Promise<number>
     "-o",
     "ServerAliveInterval=30",
     "-L",
-    `127.0.0.1:${local}:localhost:${remote}`,
+    `127.0.0.1:${local}:${target}:${remote}`,
     host,
   ]);
   const proc = spawn(file, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
@@ -97,8 +107,8 @@ export async function openForward(host: string, remote: number): Promise<number>
   return local;
 }
 
-export function closeForward(host: string, remote: number): void {
-  const k = key(host, remote);
+export function closeForward(host: string, remote: number, target = "localhost"): void {
+  const k = key(host, target, remote);
   const have = forwards.get(k);
   if (!have) return;
   forwards.delete(k);

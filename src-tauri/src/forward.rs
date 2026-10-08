@@ -27,8 +27,11 @@ pub struct ForwardManager {
     forwards: Arc<Mutex<HashMap<String, Forward>>>,
 }
 
-fn key(host: &str, remote: u16) -> String {
-    format!("{host}:{remote}")
+/// `target` is where the far end connects FROM the server: `localhost` for a
+/// port the server itself listens on, or an address the server can reach and
+/// this machine may not.
+fn key(host: &str, target: &str, remote: u16) -> String {
+    format!("{host}:{target}:{remote}")
 }
 
 /// The same port number when it is free here — the URL then reads the same — else any.
@@ -41,8 +44,8 @@ fn port_up(port: u16) -> bool {
     TcpStream::connect_timeout(&([127, 0, 0, 1], port).into(), Duration::from_millis(200)).is_ok()
 }
 
-fn open(mgr: &ForwardManager, host: &str, remote: u16) -> Result<u16, String> {
-    let k = key(host, remote);
+fn open(mgr: &ForwardManager, host: &str, remote: u16, target: &str) -> Result<u16, String> {
+    let k = key(host, target, remote);
     {
         let mut map = mgr.forwards.lock().unwrap();
         if let Some(f) = map.get_mut(&k) {
@@ -56,7 +59,7 @@ fn open(mgr: &ForwardManager, host: &str, remote: u16) -> Result<u16, String> {
     }
 
     let local_port = free_port(remote);
-    let spec = format!("127.0.0.1:{local_port}:localhost:{remote}");
+    let spec = format!("127.0.0.1:{local_port}:{target}:{remote}");
     // `-N`: no remote command, the tunnel is the whole job. `ExitOnForwardFailure`
     // turns a port that cannot be bound into an exit instead of a silent
     // tunnel to nowhere. stdin closed outright: Windows OpenSSH never exits
@@ -111,18 +114,26 @@ pub async fn port_forward_open(
     state: State<'_, ForwardManager>,
     host: String,
     remote: u16,
+    target: Option<String>,
 ) -> Result<u16, String> {
+    let target = target.filter(|t| !t.is_empty()).unwrap_or_else(|| "localhost".into());
     // Blocks for up to ten seconds while ssh connects; keep that off the
     // async runtime's threads.
     let mgr = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || open(&mgr, &host, remote))
+    tauri::async_runtime::spawn_blocking(move || open(&mgr, &host, remote, &target))
         .await
         .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-pub fn port_forward_close(state: State<'_, ForwardManager>, host: String, remote: u16) {
-    if let Some(mut f) = state.forwards.lock().unwrap().remove(&key(&host, remote)) {
+pub fn port_forward_close(
+    state: State<'_, ForwardManager>,
+    host: String,
+    remote: u16,
+    target: Option<String>,
+) {
+    let target = target.filter(|t| !t.is_empty()).unwrap_or_else(|| "localhost".into());
+    if let Some(mut f) = state.forwards.lock().unwrap().remove(&key(&host, &target, remote)) {
         let _ = f.child.kill();
     }
 }

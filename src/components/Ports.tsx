@@ -1,5 +1,5 @@
 import { openExternal } from "../ipc";
-import { closeForward, localUrl, useForwards } from "../forwards";
+import { closeForward, farEnd, localUrl, useForwards } from "../forwards";
 
 /**
  * Every ssh tunnel the app has open, across all pods — the place to see what
@@ -34,7 +34,7 @@ export function Ports() {
               .filter((f) => f.host === host)
               .map((f) => (
                 <div
-                  key={f.remote}
+                  key={`${f.target}:${f.remote}`}
                   className="flex items-center gap-2 px-3 py-1 rounded hover:bg-surface-container-high group"
                 >
                   <span className="material-symbols-outlined text-[14px] text-secondary shrink-0">
@@ -46,8 +46,8 @@ export function Ports() {
                     className="flex-1 min-w-0 text-left"
                   >
                     <div className="text-[11px] font-mono text-on-surface truncate">
-                      {f.remote}
-                      {f.local !== f.remote && (
+                      {farEnd(f)}
+                      {(f.local !== f.remote || f.target !== "localhost") && (
                         <span className="text-on-surface-variant"> → localhost:{f.local}</span>
                       )}
                     </div>
@@ -58,7 +58,7 @@ export function Ports() {
                   <span
                     className="material-symbols-outlined text-[14px] cursor-pointer text-on-surface-variant opacity-0 group-hover:opacity-100 hover:text-error"
                     title="Close the tunnel"
-                    onClick={() => void closeForward(f.host, f.remote)}
+                    onClick={() => void closeForward(f.host, f.remote, f.target)}
                   >
                     close
                   </span>

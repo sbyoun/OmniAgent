@@ -10,6 +10,11 @@ import { portForwardClose, portForwardOpen } from "./ipc";
  */
 export interface Forward {
   host: string;
+  /**
+   * Where the server connects to on its side: `localhost`, or an address the
+   * program printed instead — the server's own IP, a machine on its LAN.
+   */
+  target: string;
   /** The port on the server, as the program printed it. */
   remote: number;
   /** Where it answers on this machine — the same number when it was free. */
@@ -21,12 +26,18 @@ export interface Forward {
 let forwards: Forward[] = [];
 const listeners = new Set<() => void>();
 const emit = () => listeners.forEach((l) => l());
-const same = (f: Forward, host: string, remote: number) => f.host === host && f.remote === remote;
+const same = (f: Forward, host: string, remote: number, target: string) =>
+  f.host === host && f.remote === remote && f.target === target;
 
 /** Open (or join) the tunnel to `remote` on `host` for `podId`; resolves with the local port. */
-export async function openForward(host: string, remote: number, podId: string): Promise<number> {
-  const local = await portForwardOpen(host, remote);
-  const have = forwards.find((f) => same(f, host, remote));
+export async function openForward(
+  host: string,
+  remote: number,
+  podId: string,
+  target = "localhost",
+): Promise<number> {
+  const local = await portForwardOpen(host, remote, target);
+  const have = forwards.find((f) => same(f, host, remote, target));
   if (have) {
     if (!have.pods.includes(podId)) {
       forwards = forwards.map((f) => (f === have ? { ...f, pods: [...f.pods, podId] } : f));
@@ -34,16 +45,16 @@ export async function openForward(host: string, remote: number, podId: string): 
     }
     return local;
   }
-  forwards = [...forwards, { host, remote, local, pods: [podId] }];
+  forwards = [...forwards, { host, target, remote, local, pods: [podId] }];
   emit();
   return local;
 }
 
 /** Close the tunnel for everyone. */
-export async function closeForward(host: string, remote: number): Promise<void> {
-  forwards = forwards.filter((f) => !same(f, host, remote));
+export async function closeForward(host: string, remote: number, target = "localhost"): Promise<void> {
+  forwards = forwards.filter((f) => !same(f, host, remote, target));
   emit();
-  await portForwardClose(host, remote).catch(() => {});
+  await portForwardClose(host, remote, target).catch(() => {});
 }
 
 /** A pod is going away: leave its tunnels, closing the ones nobody else uses. */
@@ -53,10 +64,14 @@ export function releaseForwards(podId: string): void {
     .filter((f) => !orphaned.includes(f))
     .map((f) => (f.pods.includes(podId) ? { ...f, pods: f.pods.filter((p) => p !== podId) } : f));
   emit();
-  for (const f of orphaned) void portForwardClose(f.host, f.remote).catch(() => {});
+  for (const f of orphaned) void portForwardClose(f.host, f.remote, f.target).catch(() => {});
 }
 
 export const localUrl = (f: Forward, path = "/") => `http://localhost:${f.local}${path}`;
+
+/** How the far end reads: `8000` for the server's own port, `10.0.0.5:8000` otherwise. */
+export const farEnd = (f: Forward) =>
+  f.target === "localhost" ? `${f.remote}` : `${f.target}:${f.remote}`;
 
 const subscribe = (l: () => void) => {
   listeners.add(l);

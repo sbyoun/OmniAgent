@@ -330,11 +330,15 @@ function registerHandlers() {
     (_e, host: string | null, session: string, index: number) =>
       selectTmuxWindow(host, session, index),
   );
-  ipcMain.handle("port_forward_open", (_e, host: string, remote: number) =>
-    openForward(host, remote),
+  ipcMain.handle(
+    "port_forward_open",
+    (_e, host: string, remote: number, target?: string) =>
+      openForward(host, remote, target || "localhost"),
   );
-  ipcMain.handle("port_forward_close", (_e, host: string, remote: number) =>
-    closeForward(host, remote),
+  ipcMain.handle(
+    "port_forward_close",
+    (_e, host: string, remote: number, target?: string) =>
+      closeForward(host, remote, target || "localhost"),
   );
   ipcMain.handle("open_external", (_e, url: string) =>
     /^https?:/i.test(url) ? shell.openExternal(url) : undefined,
