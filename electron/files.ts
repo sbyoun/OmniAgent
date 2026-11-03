@@ -1,8 +1,17 @@
 import { spawn } from "node:child_process";
-import { promises as fs } from "node:fs";
+import { createWriteStream, promises as fs } from "node:fs";
 import { cpus, freemem, homedir, hostname, totalmem } from "node:os";
 import { join } from "node:path";
-import { localIsNativeWindows, localIsWsl, onLocalMachine, run, sshArgv, SSH_OPTS } from "./local";
+import {
+  decodeConsole,
+  localIsNativeWindows,
+  localIsWsl,
+  onLocalMachine,
+  run,
+  sshArgv,
+  SSH_ONESHOT,
+  SSH_OPTS,
+} from "./local";
 
 /**
  * Where the layout lives. Both shells write the same path on purpose: the
@@ -187,8 +196,58 @@ export async function download(host: string | null, path: string): Promise<strin
     target = join(dir, `${stem} (${n})${ext}`);
   }
 
-  await fs.writeFile(target, await readBytes(host, path));
+  if (ownFs(host)) {
+    await fs.copyFile(path, target);
+    return target;
+  }
+  // Streamed straight to disk. Buffering the whole file the way the viewer
+  // does capped a download at the 64 MB stdout limit — "stdout maxBuffer
+  // length exceeded" for any real checkpoint, dataset or video — and held all
+  // of it in memory on the way. Written to a `.part` file first so a broken
+  // transfer never leaves something that looks finished in Downloads.
+  const part = `${target}.part`;
+  try {
+    await streamTo(host, `cat ${shellQuote(path)}`, part);
+    await fs.rename(part, target);
+  } catch (e) {
+    await fs.rm(part, { force: true }).catch(() => {});
+    throw e;
+  }
   return target;
+}
+
+/** Run a command on the host (or in the distro) and write its stdout to `file`. */
+function streamTo(host: string | null, command: string, file: string): Promise<void> {
+  const [cmd, args] = host
+    ? sshArgv([...SSH_ONESHOT, host, command])
+    : onLocalMachine("sh", ["-c", command]);
+  return new Promise((resolve, reject) => {
+    const out = createWriteStream(file);
+    const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const stderr: Buffer[] = [];
+    let code: number | null = null;
+    let pending = 2; // the child's exit and the file's close
+    const done = () => {
+      if (--pending > 0) return;
+      if (code === 0) resolve();
+      else reject(new Error(decodeConsole(Buffer.concat(stderr)) || `exit ${code}`));
+    };
+    child.stderr.on("data", (c: Buffer) => stderr.push(c));
+    child.stdout.pipe(out);
+    child.on("error", (e) => {
+      out.destroy();
+      reject(e);
+    });
+    child.on("close", (c) => {
+      code = c;
+      done();
+    });
+    out.on("error", (e) => {
+      child.kill();
+      reject(e);
+    });
+    out.on("close", done);
+  });
 }
 
 /**

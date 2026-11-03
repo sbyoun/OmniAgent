@@ -244,14 +244,33 @@ pub async fn fs_download(host: Option<String>, path: String) -> Result<String, S
             std::fs::copy(&path, &target).map_err(|e| e.to_string())?;
         }
         host => {
+            // Streamed straight to disk through a `.part` file, never held in
+            // memory: a remote checkpoint or video can be gigabytes, and a
+            // broken transfer must not leave something that looks finished.
+            let part = target.with_file_name(format!(
+                "{}.part",
+                target.file_name().and_then(|n| n.to_str()).unwrap_or("download")
+            ));
+            let file = std::fs::File::create(&part).map_err(|e| e.to_string())?;
             let output = local::fs_shell(host.as_deref())
                 .arg(format!("cat {}", shell_quote(&path)))
-                .output()
-                .map_err(|e| e.to_string())?;
-            if !output.status.success() {
-                return Err(String::from_utf8_lossy(&output.stderr).to_string());
+                .stdin(Stdio::null())
+                .stdout(file)
+                .stderr(Stdio::piped())
+                .output();
+            match output {
+                Ok(o) if o.status.success() => {
+                    std::fs::rename(&part, &target).map_err(|e| e.to_string())?;
+                }
+                Ok(o) => {
+                    let _ = std::fs::remove_file(&part);
+                    return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&part);
+                    return Err(e.to_string());
+                }
             }
-            std::fs::write(&target, &output.stdout).map_err(|e| e.to_string())?;
         }
     }
     Ok(target.to_string_lossy().to_string())
