@@ -451,7 +451,7 @@ pub fn pty_resize(
 #[tauri::command]
 pub async fn tmux_pane_path(host: Option<String>, session: String) -> Option<String> {
     let query = format!(
-        "tmux display -p -t '={}' '#{{pane_current_path}}' 2>/dev/null",
+        "tmux display -p -t '={}:' '#{{pane_current_path}}' 2>/dev/null",
         session.replace('\'', "")
     );
     let out = local::shell_command(host.as_deref(), &query).output().ok()?;

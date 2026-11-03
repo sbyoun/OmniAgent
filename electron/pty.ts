@@ -543,7 +543,7 @@ export function killAllPtys(): void {
  */
 export function tmuxPanePath(host: string | null, session: string): Promise<string | null> {
   if (noLocalTmux(host)) return Promise.resolve(null);
-  const query = `tmux display -p -t '=${quote(session)}' '#{pane_current_path}' 2>/dev/null`;
+  const query = `tmux display -p -t '=${quote(session)}:' '#{pane_current_path}' 2>/dev/null`;
   const [file, args] = shellArgv(host, query);
   return new Promise((resolve) => {
     execFile(file, args, { env: { ...process.env, PATH: toolPath } }, (_err, stdout) => {
