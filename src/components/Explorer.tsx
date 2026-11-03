@@ -22,6 +22,35 @@ interface Props {
   width: number;
 }
 
+/**
+ * The last folder the explorer showed on each machine, so a new pod on a host
+ * opens where work on that host last was instead of at home. A pod restored
+ * from the layout keeps its own folder; this is only the default for a pod
+ * that has none yet. Per viewer and best-effort: a private window or cleared
+ * storage just means home.
+ */
+const LAST_DIR_KEY = "omniagent.lastExplorerDir";
+const hostKey = (host: string | null) => host ?? "local";
+
+function lastDir(host: string | null): string | undefined {
+  try {
+    const map = JSON.parse(localStorage.getItem(LAST_DIR_KEY) ?? "{}") as Record<string, string>;
+    return map[hostKey(host)];
+  } catch {
+    return undefined;
+  }
+}
+
+function rememberDir(host: string | null, path: string) {
+  try {
+    const map = JSON.parse(localStorage.getItem(LAST_DIR_KEY) ?? "{}") as Record<string, string>;
+    map[hostKey(host)] = path;
+    localStorage.setItem(LAST_DIR_KEY, JSON.stringify(map));
+  } catch {
+    /* storage unavailable — the next pod opens at home */
+  }
+}
+
 export function Explorer({
   host,
   onOpenFile,
@@ -73,17 +102,21 @@ export function Explorer({
     };
   }, [menu]);
 
+  /** Show `path`; resolves false (with the error on screen) when it cannot be listed. */
   const load = useCallback(
-    async (path: string) => {
+    async (path: string): Promise<boolean> => {
       setLoading(true);
       setError(null);
       try {
         const list = await fsListDir(host, path);
         setCwd(path);
         onCwdChange?.(path);
+        rememberDir(host, path);
         setEntries(list);
+        return true;
       } catch (e) {
         setError(String(e));
+        return false;
       } finally {
         setLoading(false);
       }
@@ -93,16 +126,19 @@ export function Explorer({
 
   useEffect(() => {
     let cancelled = false;
-    // Reopen where we left off; fall back to the home directory.
-    if (initialPath) {
-      load(initialPath).catch(() => fsHomeDir(host).then(load));
-      return;
-    }
-    fsHomeDir(host)
-      .then((home) => {
-        if (!cancelled) load(home);
-      })
-      .catch((e) => setError(String(e)));
+    // Reopen where this pod left off, else where work on this machine last
+    // was, else home. A folder that has since gone falls through to home.
+    const start = initialPath ?? lastDir(host);
+    void (async () => {
+      if (start && (await load(start))) return;
+      if (cancelled) return;
+      try {
+        const home = await fsHomeDir(host);
+        if (!cancelled) await load(home);
+      } catch (e) {
+        setError(String(e));
+      }
+    })();
     return () => {
       cancelled = true;
     };
