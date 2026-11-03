@@ -173,6 +173,7 @@ pub fn run() {
             pty::pty_kill,
             pty::pty_detach,
             pty::tmux_session_started,
+            pty::tmux_pane_path,
             pty::tmux_sessions,
             pty::tmux_kill_session,
             pty::tmux_rename_session,

@@ -19,6 +19,7 @@ import {
   tmuxSelectWindow,
   tmuxSessions,
   tmuxSessionStarted,
+  tmuxPanePath,
   onPtyExit,
   onPtyOutput,
   ptyKill,
@@ -234,15 +235,38 @@ function Splitter({
  * known extension. Trailing punctuation and :line:col suffixes are trimmed by
  * the caller.
  */
-const PATH_RE =
-  /(?:~|\.{1,2})?\/[\w.\-/@+]+|\b[\w.\-]+\/[\w.\-/@+]+|\b[\w.\-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|toml|ya?ml|md|txt|log|css|scss|html|py|rs|go|java|kt|swift|c|h|cpp|hpp|sh|zsh|sql|env|lock|pdf)\b/g;
+//
+// Path characters are any letter or digit, not just ASCII: a directory named
+// in Korean is a directory. That also lets a particle glued onto the end of a
+// path in a sentence (`src/app.ts에서`) into the match; the click strips such
+// a tail back off when the path as matched does not exist (see `candidates`).
+const SEG = "[\\p{L}\\p{N}_.\\-@+]";
+const PATH_RE = new RegExp(
+  `(?:~|\\.{1,2})?\\/${SEG}+(?:\\/${SEG}*)*` +
+    `|(?<![\\p{L}\\p{N}_])${SEG}+\\/${SEG}+(?:\\/${SEG}*)*` +
+    `|(?<![\\p{L}\\p{N}_.])[\\p{L}\\p{N}_\\-]+(?:\\.[\\p{L}\\p{N}_\\-]+)*\\.(?:ts|tsx|js|jsx|mjs|cjs|json|toml|ya?ml|md|txt|log|css|scss|html|py|rs|go|java|kt|swift|c|h|cpp|hpp|sh|zsh|sql|env|lock|pdf|png|jpe?g|gif|svg|webp|csv|ipynb)(?![\\p{L}\\p{N}_])`,
+  "gu",
+);
 
 /** Strip decoration the shell or an agent tends to put around a path. */
 function cleanPath(raw: string): string {
-  let p = raw.replace(/^[('"`\[]+/, "").replace(/[)'"`\],.;:]+$/, "");
+  let p = raw.replace(/^[('"`\[*]+/, "").replace(/[)'"`\],.;:*]+$/, "");
   // file.ts:12:3 / file.ts:12 → file.ts
   p = p.replace(/:(\d+)(:\d+)?$/, "");
   return p;
+}
+
+/**
+ * What a matched path might really be, most literal first: as printed, then
+ * with a trailing run of Hangul taken off (a particle — `에서`, `을`, `의` —
+ * glued to the path in a sentence), then with sentence punctuation that the
+ * particle had been hiding. The click tries each until one exists.
+ */
+function candidates(p: string): string[] {
+  const out = [p];
+  const bare = p.replace(/[\u3131-\u318E\uAC00-\uD7A3]{1,4}$/u, "").replace(/[.,;:]+$/, "");
+  if (bare && bare !== p) out.push(bare);
+  return out;
 }
 
 /** The bits of xterm's internals the pod reaches into. */
@@ -1068,19 +1092,41 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
     window.addEventListener("keydown", onModKey);
     window.addEventListener("keyup", onModKey);
 
-    const resolvePath = async (raw: string): Promise<string | null> => {
+    /**
+     * Turn a printed path into one that exists, or null. Absolute and `~`
+     * paths are taken as they are. A relative one is tried against, in turn:
+     * the directory the pod's program is working in (what it meant — tmux
+     * knows it), the directory the explorer is showing, and home. Each form
+     * from `candidates` is tried against each base until something is there.
+     */
+    const resolvePath = async (
+      raw: string,
+    ): Promise<{ path: string; isDir: boolean } | null> => {
       const p = cleanPath(raw);
       if (!p) return null;
-      if (p.startsWith("/")) return p;
-      if (p.startsWith("~")) {
-        if (!homeRef.current) homeRef.current = await fsHomeDir(host);
-        return p.replace(/^~/, homeRef.current);
+      const home = async () => (homeRef.current ??= await fsHomeDir(host));
+      let bases: (string | null)[];
+      if (p.startsWith("/")) bases = [""];
+      else if (p.startsWith("~")) bases = [await home()];
+      else
+        bases = [
+          await tmuxPanePath(host, session).catch(() => null),
+          explorerCwdRef.current,
+          await home().catch(() => null),
+        ];
+      const tried = new Set<string>();
+      for (const base of bases) {
+        if (base === null) continue;
+        for (const c of candidates(p)) {
+          const rel = c.replace(/^~/, "").replace(/^\.\//, "");
+          const full = base === "" ? c : `${base.replace(/\/$/, "")}/${rel.replace(/^\//, "")}`;
+          if (tried.has(full)) continue;
+          tried.add(full);
+          const info = await fsStat(host, full).catch(() => null);
+          if (info?.exists) return { path: full, isDir: info.is_dir };
+        }
       }
-      // Relative paths resolve against the directory the explorer is showing;
-      // with no explorer open there is nothing to resolve against.
-      const base = explorerCwdRef.current;
-      if (!base) return null;
-      return `${base.replace(/\/$/, "")}/${p.replace(/^\.\//, "")}`;
+      return null;
     };
 
     const linkSub = term.registerLinkProvider({
@@ -1118,6 +1164,9 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
           const raw = m[0];
           const start = m.index ?? 0;
           if (taken(start)) continue;
+          // `https://host/x` reads as `//host/x` to the path pattern; a path
+          // right after a scheme's colon is a URL, not a file.
+          if (/[:/]/.test(text[start - 1] ?? "")) continue;
           links.push({
             range: {
               start: { x: start + 1, y: lineNumber },
@@ -1125,20 +1174,14 @@ export function TerminalPod(props: IDockviewPanelProps<PodParams>) {
             },
             text: raw,
             activate: async () => {
-              const full = await resolvePath(raw);
-              if (!full) return;
-              try {
-                const info = await fsStat(host, full);
-                if (!info.exists) return;
-                if (info.is_dir) {
-                  props.api.updateParameters({ explorerOpen: true });
-                  setExplorerGoto({ path: full, nonce: Date.now() });
-                } else {
-                  setEditorPath(full);
-                  props.api.updateParameters({ editorOpen: true });
-                }
-              } catch {
-                /* unreachable path — leave the terminal alone */
+              const found = await resolvePath(raw);
+              if (!found) return;
+              if (found.isDir) {
+                props.api.updateParameters({ explorerOpen: true });
+                setExplorerGoto({ path: found.path, nonce: Date.now() });
+              } else {
+                setEditorPath(found.path);
+                props.api.updateParameters({ editorOpen: true });
               }
             },
           });

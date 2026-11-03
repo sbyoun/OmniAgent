@@ -20,6 +20,7 @@ import {
   selectTmuxWindow,
   spawnPty,
   tmuxSessionStarted,
+  tmuxPanePath,
   writePty,
 } from "./pty";
 import { listSshHosts } from "./sshConfig";
@@ -280,6 +281,9 @@ function registerHandlers() {
   ipcMain.on("pty_detach", (_e, id: string) => detachPty(id));
   ipcMain.handle("tmux_session_started", (_e, host: string | null, session: string) =>
     tmuxSessionStarted(host, session),
+  );
+  ipcMain.handle("tmux_pane_path", (_e, host: string | null, session: string) =>
+    tmuxPanePath(host, session),
   );
 
   ipcMain.handle("fs_list_dir", (_e, host: string | null, path: string) =>

@@ -445,6 +445,20 @@ pub fn pty_resize(
 /// When the pod's tmux session was created (epoch seconds). That, not the
 /// moment the pod was opened, is how long the work has been running — the
 /// session outlives app restarts.
+/// The directory the pod's foreground process is working in — what a
+/// relative path it prints is relative to. Mirrors `tmuxPanePath` in
+/// electron/pty.ts.
+#[tauri::command]
+pub async fn tmux_pane_path(host: Option<String>, session: String) -> Option<String> {
+    let query = format!(
+        "tmux display -p -t '={}' '#{{pane_current_path}}' 2>/dev/null",
+        session.replace('\'', "")
+    );
+    let out = local::shell_command(host.as_deref(), &query).output().ok()?;
+    let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    dir.starts_with('/').then_some(dir)
+}
+
 #[tauri::command]
 pub async fn tmux_session_started(host: Option<String>, session: String) -> Option<i64> {
     let query = format!(

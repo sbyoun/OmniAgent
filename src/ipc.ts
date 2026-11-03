@@ -98,6 +98,10 @@ export const ptyKill = (id: string) => backend.call<void>("pty_kill", { id });
 export const ptyDetach = (id: string) =>
   backend.call<void>("pty_detach", { id });
 
+/** The directory the pod's foreground process works in — what relative paths mean. */
+export const tmuxPanePath = (host: string | null, session: string) =>
+  backend.call<string | null>("tmux_pane_path", { host, session });
+
 /** Epoch seconds when the pod's tmux session was created, if it has one. */
 export const tmuxSessionStarted = (host: string | null, session: string) =>
   backend.call<number | null>("tmux_session_started", { host, session });

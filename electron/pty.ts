@@ -535,6 +535,24 @@ export function killAllPtys(): void {
  * moment the pod was opened, is how long the work has been running — the
  * session outlives app restarts.
  */
+/**
+ * The directory the pod's shell — or the program in front of it — is working
+ * in. A relative path an agent prints is relative to THIS, not to whatever
+ * the explorer happens to show. tmux reads it from the foreground process,
+ * so a `cd` inside Claude Code's own shell is followed too.
+ */
+export function tmuxPanePath(host: string | null, session: string): Promise<string | null> {
+  if (noLocalTmux(host)) return Promise.resolve(null);
+  const query = `tmux display -p -t '=${quote(session)}' '#{pane_current_path}' 2>/dev/null`;
+  const [file, args] = shellArgv(host, query);
+  return new Promise((resolve) => {
+    execFile(file, args, { env: { ...process.env, PATH: toolPath } }, (_err, stdout) => {
+      const dir = stdout.trim();
+      resolve(dir.startsWith("/") ? dir : null);
+    });
+  });
+}
+
 export function tmuxSessionStarted(
   host: string | null,
   session: string,
