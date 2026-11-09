@@ -32,6 +32,7 @@
     "@xterm/xterm": "^6.0.0",
     "dockview-react": "^7.0.4",
     "dompurify": "^3.4.12",
+    "katex": "^0.16.47",
     "marked": "^18.0.7",
     "material-symbols": "^0.47.1",
     "node-pty": "^1.1.0",

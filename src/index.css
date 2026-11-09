@@ -405,3 +405,10 @@ body,
   scrollbar-width: thin;
   scrollbar-color: #353535 transparent;
 }
+
+/* Display math: centered by KaTeX; long equations scroll instead of overflowing the pane */
+.markdown-preview .math-display {
+  margin: 0 0 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}

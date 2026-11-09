@@ -2,8 +2,11 @@ import Editor, { OnMount } from "@monaco-editor/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import { markedMath } from "../markdownMath";
 import { fsDownload, fsReadBase64, fsReadFile, fsWriteFile } from "../ipc";
 import { activeFont, primaryFamily, useSettings } from "../settings";
+
+marked.use(markedMath);
 
 interface Props {
   host: string | null;
